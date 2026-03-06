@@ -1,347 +1,302 @@
-from datetime import datetime, timedelta, timezone
 import io
-import json
-import sqlite3
-from pathlib import Path
-from typing import Any
+from datetime import datetime, timezone
 
 import requests
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from PIL import Image, ImageDraw, ImageFont
 from starlette.middleware.sessions import SessionMiddleware
 
+from backend.cache import get_cache, set_cache
+from backend.db import get_user_by_athlete_id, init_db, upsert_user
 from backend.settings import settings
+from backend.strava_auth import refresh_access_token_if_needed
+from backend.strava_segments import detect_goal_pace_lap_blocks, total_block_km
+
+from backend.share_public import router as share_public_router
 
 app = FastAPI()
-
+app.include_router(share_public_router)
 app.add_middleware(
-    SessionMiddleware,
-    secret_key=settings.STRAVA_CLIENT_SECRET,
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
+app.add_middleware(SessionMiddleware, secret_key=settings.APP_SESSION_SECRET)
 
-# --- Paths / DB ---
-BASE_DIR = Path(__file__).resolve().parent.parent
-DB_PATH = BASE_DIR / "secondcoach.db"
+init_db()
 
-# --- Strava OAuth / API config ---
-TOKEN_URL = "https://www.strava.com/oauth/token"
 ACTIVITIES_URL = "https://www.strava.com/api/v3/athlete/activities"
-ATHLETE_URL = "https://www.strava.com/api/v3/athlete"
+STRAVA_AUTHORIZE_URL = "https://www.strava.com/oauth/authorize"
+STRAVA_TOKEN_URL = "https://www.strava.com/oauth/token"
 
-# --- Marathon context (current goal) ---
-MARATHON_DATE = "2026-04-12"
-MARATHON_TARGET = "3:30"  # hh:mm
-PB_MARATHON = "3:34"      # hh:mm
+DISTANCES = {
+    "10k": 10.0,
+    "half": 21.097,
+    "marathon": 42.195,
+}
 
-
-def get_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def init_db() -> None:
-    conn = get_db()
-    try:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                strava_athlete_id INTEGER NOT NULL UNIQUE,
-                access_token TEXT NOT NULL,
-                refresh_token TEXT,
-                expires_at INTEGER,
-                firstname TEXT,
-                lastname TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )
-            """
-        )
-        conn.commit()
-    finally:
-        conn.close()
+RACE_NAMES = {
+    "10k": "10K",
+    "half": "Media Maratón",
+    "marathon": "Maratón de Zaragoza",
+}
 
 
-@app.on_event("startup")
-def on_startup() -> None:
-    init_db()
+def _to_minutes(t: str) -> int:
+    parts = t.split(":")
+    if len(parts) != 2:
+        raise ValueError(f"Formato de tiempo no válido: {t}")
+    h, m = parts
+    return int(h) * 60 + int(m)
 
 
-def upsert_user_token(token_data: dict[str, Any], athlete_data: dict[str, Any]) -> int:
-    athlete_id = athlete_data["id"]
-    now_iso = datetime.now(timezone.utc).isoformat()
-
-    conn = get_db()
-    try:
-        conn.execute(
-            """
-            INSERT INTO users (
-                strava_athlete_id,
-                access_token,
-                refresh_token,
-                expires_at,
-                firstname,
-                lastname,
-                created_at,
-                updated_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(strava_athlete_id) DO UPDATE SET
-                access_token = excluded.access_token,
-                refresh_token = excluded.refresh_token,
-                expires_at = excluded.expires_at,
-                firstname = excluded.firstname,
-                lastname = excluded.lastname,
-                updated_at = excluded.updated_at
-            """,
-            (
-                athlete_id,
-                token_data.get("access_token"),
-                token_data.get("refresh_token"),
-                token_data.get("expires_at"),
-                athlete_data.get("firstname"),
-                athlete_data.get("lastname"),
-                now_iso,
-                now_iso,
-            ),
-        )
-        conn.commit()
-        return athlete_id
-    finally:
-        conn.close()
+def _fmt(m: int) -> str:
+    h = int(m // 60)
+    mm = int(m % 60)
+    return f"{h}:{mm:02d}"
 
 
-def update_user_tokens(
-    athlete_id: int,
-    access_token: str,
-    refresh_token: str | None,
-    expires_at: int | None,
-) -> None:
-    now_iso = datetime.now(timezone.utc).isoformat()
+def get_current_user(request: Request):
+    session_user = request.session.get("user")
 
-    conn = get_db()
-    try:
-        conn.execute(
-            """
-            UPDATE users
-            SET access_token = ?,
-                refresh_token = ?,
-                expires_at = ?,
-                updated_at = ?
-            WHERE strava_athlete_id = ?
-            """,
-            (access_token, refresh_token, expires_at, now_iso, athlete_id),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-
-def get_user_by_athlete_id(athlete_id: int) -> sqlite3.Row | None:
-    conn = get_db()
-    try:
-        row = conn.execute(
-            """
-            SELECT *
-            FROM users
-            WHERE strava_athlete_id = ?
-            """,
-            (athlete_id,),
-        ).fetchone()
-        return row
-    finally:
-        conn.close()
-
-
-def get_current_user(request: Request) -> sqlite3.Row | None:
-    athlete_id = request.session.get("athlete_id")
-    if athlete_id is None:
+    if not session_user:
         return None
-    return get_user_by_athlete_id(int(athlete_id))
+
+    athlete_id = session_user.get("strava_athlete_id")
+    if not athlete_id:
+        return None
+
+    return get_user_by_athlete_id(athlete_id)
 
 
-def refresh_access_token_if_needed(user: sqlite3.Row) -> sqlite3.Row:
-    athlete_id = user["strava_athlete_id"]
-    refresh_token = user["refresh_token"]
-    expires_at = user["expires_at"]
+def detect_quality_blocks(runs):
+    blocks = []
 
-    now_ts = int(datetime.now(timezone.utc).timestamp())
-    should_refresh = (
-        refresh_token
-        and expires_at is not None
-        and int(expires_at) <= now_ts + 300
-    )
+    for act in runs:
+        distance_km = act.get("distance", 0) / 1000
+        moving = act.get("moving_time", 0)
 
-    if not should_refresh:
-        return user
+        if moving <= 0 or distance_km <= 0:
+            continue
 
-    token_response = requests.post(
-        TOKEN_URL,
-        data={
-            "client_id": settings.STRAVA_CLIENT_ID,
-            "client_secret": settings.STRAVA_CLIENT_SECRET,
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-        },
+        pace = (moving / 60) / distance_km
+
+        if distance_km >= 0.8 and pace < 5.0:
+            blocks.append((distance_km, pace))
+
+    return blocks
+
+
+def compute_training(runs):
+    now = datetime.now(timezone.utc)
+
+    km_7 = sum(
+        a.get("distance", 0)
+        for a in runs
+        if (now - datetime.fromisoformat(a["start_date"].replace("Z", "+00:00"))).days <= 7
+    ) / 1000
+
+    km_28 = sum(
+        a.get("distance", 0)
+        for a in runs
+        if (now - datetime.fromisoformat(a["start_date"].replace("Z", "+00:00"))).days <= 28
+    ) / 1000
+
+    avg_week = round(km_28 / 4, 1) if km_28 else 0.0
+
+    long_km = max(
+        (
+            a.get("distance", 0)
+            for a in runs
+            if (now - datetime.fromisoformat(a["start_date"].replace("Z", "+00:00"))).days <= 28
+        ),
+        default=0,
+    ) / 1000
+
+    return km_7, avg_week, long_km
+
+
+def compute_prediction(distance, avg_week, long_km, quality_blocks):
+    base_pb = _to_minutes("3:34")
+
+    vol_bonus = max(0, avg_week - 40) * 0.35
+    lr_bonus = max(0, long_km - 24) * 0.8
+
+    quality_bonus = 0
+    if quality_blocks:
+        best_block = min(quality_blocks, key=lambda x: x[1])
+        quality_bonus = max(0, 5 - best_block[1]) * 3
+
+    pred_marathon = base_pb - vol_bonus - lr_bonus - quality_bonus
+
+    ratio = distance / 42.195
+    pred = pred_marathon * ratio
+
+    low = int(round(pred - 3))
+    high = int(round(pred + 4))
+
+    return int(round(pred)), low, high
+
+
+def get_cached_activities(user: dict, per_page: int = 20):
+    headers = {"Authorization": f"Bearer {user['access_token']}"}
+    cache_key = f"activities_{user['strava_athlete_id']}_{per_page}"
+
+    acts = get_cache(cache_key, ttl_seconds=600)
+    if acts is not None:
+        return acts, None
+
+    response = requests.get(
+        ACTIVITIES_URL,
+        headers=headers,
+        params={"per_page": per_page},
         timeout=30,
     )
-    token_response.raise_for_status()
-    token_data = token_response.json()
 
-    new_access_token = token_data.get("access_token")
-    new_refresh_token = token_data.get("refresh_token", refresh_token)
-    new_expires_at = token_data.get("expires_at", expires_at)
+    if response.status_code == 429:
+        return None, "rate_limited"
 
-    if not new_access_token:
-        raise requests.HTTPError("Strava no devolvió access_token al refrescar el token.")
+    response.raise_for_status()
+    acts = response.json()
+    set_cache(cache_key, acts)
+    return acts, None
 
-    update_user_tokens(
-        athlete_id=athlete_id,
-        access_token=new_access_token,
-        refresh_token=new_refresh_token,
-        expires_at=new_expires_at,
+
+def get_common_analysis(request: Request, user: dict):
+    acts, error = get_cached_activities(user, per_page=20)
+    if error == "rate_limited":
+        return None, "rate_limited"
+
+    runs = [a for a in acts if a.get("type") == "Run"]
+
+    km_7, avg_week, long_km = compute_training(runs)
+    quality_blocks = detect_quality_blocks(runs)
+
+    race_type = request.session.get("race_type", "marathon")
+    goal_time = request.session.get("goal_time", "3:30")
+    race_date = request.session.get("race_date", "2026-04-12")
+
+    goal_h, goal_m = map(int, goal_time.split(":"))
+    target_pace_sec = ((goal_h * 3600) + (goal_m * 60)) / 42.195
+
+    lap_blocks = detect_goal_pace_lap_blocks(
+        access_token=user["access_token"],
+        runs=runs[:12],
+        target_pace_sec=target_pace_sec,
+        tolerance_sec=20,
+        min_block_km=2.0,
     )
+    lap_block_km = total_block_km(lap_blocks)
 
-    refreshed_user = get_user_by_athlete_id(athlete_id)
-    if refreshed_user is None:
-        raise RuntimeError("No se pudo recargar el usuario tras refrescar token.")
+    distance = DISTANCES[race_type]
+    pred, low, high = compute_prediction(distance, avg_week, long_km, quality_blocks)
 
-    return refreshed_user
+    pace = pred / distance
+    pace_min = int(pace)
+    pace_sec = int((pace % 1) * 60)
 
+    goal_min = _to_minutes(goal_time)
+    diff = pred - goal_min
 
-@app.get("/", response_class=HTMLResponse)
-def home():
-    return HTMLResponse(
-        """
-        <html>
-        <head>
-          <meta name="viewport" content="width=device-width, initial-scale=1">
-          <title>SecondCoach</title>
-          <style>
-            body {
-              font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-              margin: 0;
-              background: #f7f7f7;
-              color: #111;
-            }
-            .wrap {
-              max-width: 720px;
-              margin: 0 auto;
-              padding: 32px 20px 48px 20px;
-            }
-            .hero {
-              background: white;
-              border: 1px solid #eee;
-              border-radius: 18px;
-              padding: 28px;
-              box-shadow: 0 2px 10px rgba(0,0,0,0.04);
-            }
-            h1 {
-              font-size: 42px;
-              line-height: 1.05;
-              margin: 0 0 14px 0;
-            }
-            .sub {
-              font-size: 22px;
-              line-height: 1.3;
-              margin: 0 0 18px 0;
-            }
-            .muted {
-              color: #666;
-              font-size: 18px;
-              line-height: 1.5;
-            }
-            .cta {
-              display: inline-block;
-              margin-top: 22px;
-              padding: 14px 18px;
-              border-radius: 14px;
-              background: #fc4c02;
-              color: white;
-              text-decoration: none;
-              font-weight: 700;
-            }
-            .card {
-              background: white;
-              border: 1px solid #eee;
-              border-radius: 18px;
-              padding: 22px 24px;
-              margin-top: 18px;
-              box-shadow: 0 2px 10px rgba(0,0,0,0.04);
-            }
-            ul {
-              margin: 12px 0 0 0;
-              padding-left: 20px;
-              line-height: 1.8;
-            }
-            .tiny {
-              margin-top: 16px;
-              color: #777;
-              font-size: 14px;
-            }
-          </style>
-        </head>
-        <body>
-          <div class="wrap">
-            <div class="hero">
-              <h1>SecondCoach</h1>
-              <p class="sub">¿Tu entrenamiento realmente te lleva a tu objetivo?</p>
-              <p class="muted">
-                Conecta tu Strava y descubre en segundos tu estado de carga,
-                tu predicción de maratón y si tu objetivo es realista.
-              </p>
-              <a class="cta" href="/login">Conectar con Strava</a>
-              <div class="tiny">Sin formularios. Sin configurar nada. Entra y mira tu análisis.</div>
-            </div>
+    target_weekly = 65 if race_type == "marathon" else 50 if race_type == "half" else 40
+    target_long = 30 if race_type == "marathon" else 18 if race_type == "half" else 12
 
-            <div class="card">
-              <b>Qué te damos</b>
-              <ul>
-                <li>Estado de carga simple: verde, amarillo o rojo</li>
-                <li>Volumen 7/14/28 días</li>
-                <li>Tirada larga reciente</li>
-                <li>Predicción maratón explicada</li>
-              </ul>
-            </div>
-          </div>
-        </body>
-        </html>
-        """
-    )
+    if diff <= 0:
+        coach_message = "Vas en línea con tu objetivo."
+        readiness = "on_track"
+        readiness_label = "En línea con el objetivo"
+    elif diff <= 5:
+        coach_message = "Estás cerca, pero aún falta consolidar."
+        readiness = "close"
+        readiness_label = "Cerca del objetivo"
+    else:
+        coach_message = "Aún falta carga para asegurar el objetivo."
+        readiness = "needs_work"
+        readiness_label = "Aún falta consolidar"
 
+    if lap_block_km < 5:
+        coach_detail = (
+            f"Pocos km en bloques por series/laps cerca de ritmo maratón ({lap_block_km:.1f} km). "
+            f"Intenta acumular 10–15 km/sem cerca de tu ritmo objetivo."
+        )
+        specificity = "low"
+    elif lap_block_km < 12:
+        coach_detail = (
+            f"Buen progreso: {lap_block_km:.1f} km recientes en bloques por series/laps cerca de ritmo maratón."
+        )
+        specificity = "medium"
+    else:
+        coach_detail = (
+            f"Excelente: {lap_block_km:.1f} km recientes en bloques por series/laps cerca de ritmo maratón, "
+            f"indicador fuerte para el objetivo."
+        )
+        specificity = "high"
 
-@app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok"}
+    if diff <= -3:
+        probability = 82
+    elif diff <= 0:
+        probability = 72
+    elif diff <= 5:
+        probability = 58
+    else:
+        probability = 38
 
+    if lap_block_km >= 40:
+        probability = min(96, probability + 12)
+    elif lap_block_km >= 20:
+        probability = min(92, probability + 8)
+    elif lap_block_km >= 10:
+        probability = min(88, probability + 5)
 
-@app.get("/healthz")
-def healthz() -> dict[str, str]:
     return {
-        "status": "ok",
-        "service": "secondcoach",
-        "time": datetime.now(timezone.utc).isoformat(),
-    }
+        "runs": runs,
+        "km_7": round(km_7, 1),
+        "avg_week": round(avg_week, 1),
+        "long_km": round(long_km, 1),
+        "quality_blocks": quality_blocks,
+        "lap_blocks": lap_blocks,
+        "lap_block_km": lap_block_km,
+        "race_type": race_type,
+        "race_date": race_date,
+        "goal_time": goal_time,
+        "pred": pred,
+        "low": low,
+        "high": high,
+        "pace_min": pace_min,
+        "pace_sec": pace_sec,
+        "pred_time": _fmt(pred),
+        "diff": diff,
+        "probability": probability,
+        "coach_message": coach_message,
+        "coach_detail": coach_detail,
+        "readiness": readiness,
+        "readiness_label": readiness_label,
+        "specificity": specificity,
+        "target_weekly": target_weekly,
+        "target_long": target_long,
+    }, None
 
 
 @app.get("/login")
 def login():
     url = (
-        "https://www.strava.com/oauth/authorize"
+        f"{STRAVA_AUTHORIZE_URL}"
         f"?client_id={settings.STRAVA_CLIENT_ID}"
-        "&response_type=code"
+        f"&response_type=code"
         f"&redirect_uri={settings.STRAVA_REDIRECT_URI}"
-        "&scope=activity:read_all"
+        f"&scope=read,activity:read_all"
     )
     return RedirectResponse(url)
 
 
 @app.get("/callback")
 def callback(request: Request, code: str):
-    token_response = requests.post(
-        TOKEN_URL,
+    response = requests.post(
+        STRAVA_TOKEN_URL,
         data={
             "client_id": settings.STRAVA_CLIENT_ID,
             "client_secret": settings.STRAVA_CLIENT_SECRET,
@@ -350,503 +305,48 @@ def callback(request: Request, code: str):
         },
         timeout=30,
     )
-    token_response.raise_for_status()
-    token_data = token_response.json()
+    response.raise_for_status()
+    token_data = response.json()
 
-    access_token = token_data.get("access_token")
-    if not access_token:
-        return JSONResponse(
-            {"error": "Strava no devolvió access_token."},
-            status_code=502,
-        )
+    athlete = token_data.get("athlete", {})
+    athlete_id = athlete.get("id")
 
-    athlete_response = requests.get(
-        ATHLETE_URL,
-        headers={"Authorization": f"Bearer {access_token}"},
-        timeout=30,
+    if not athlete_id:
+        return HTMLResponse("<h1>Error obteniendo athlete_id de Strava</h1>", status_code=400)
+
+    upsert_user(
+        strava_athlete_id=athlete_id,
+        username=athlete.get("username"),
+        firstname=athlete.get("firstname"),
+        lastname=athlete.get("lastname"),
+        access_token=token_data["access_token"],
+        refresh_token=token_data["refresh_token"],
+        expires_at=token_data["expires_at"],
     )
-    athlete_response.raise_for_status()
-    athlete_data = athlete_response.json()
 
-    athlete_id = upsert_user_token(token_data, athlete_data)
-    request.session["athlete_id"] = athlete_id
+    request.session["user"] = {
+        "strava_athlete_id": athlete_id,
+    }
 
     return RedirectResponse("/dashboard")
 
 
-def _parse_strava_dt(value: str) -> datetime:
-    if value.endswith("Z"):
-        value = value.replace("Z", "+00:00")
-    return datetime.fromisoformat(value)
-
-
-def _to_minutes(hhmm: str) -> int:
-    h, m = hhmm.split(":")
-    return int(h) * 60 + int(m)
-
-
-def _fmt(mins: int) -> str:
-    h = mins // 60
-    m = mins % 60
-    return f"{h}:{m:02d}"
-
-
-def _unauthorized():
-    return JSONResponse(
-        {"error": "No user session. Ve a /login para autorizar Strava."},
-        status_code=401,
-    )
-
-
-def _get_activities(request: Request) -> list[dict[str, Any]] | JSONResponse:
-    user = get_current_user(request)
-    if not user:
-        return _unauthorized()
-
-    try:
-        user = refresh_access_token_if_needed(user)
-        headers = {"Authorization": f"Bearer {user['access_token']}"}
-
-        response = requests.get(
-            ACTIVITIES_URL,
-            headers=headers,
-            params={"per_page": 200},
-            timeout=30,
-        )
-        response.raise_for_status()
-        data = response.json()
-
-        if not isinstance(data, list):
-            return JSONResponse(
-                {"error": "Respuesta inesperada de Strava al pedir actividades."},
-                status_code=502,
-            )
-
-        return data
-
-    except requests.RequestException as exc:
-        return JSONResponse(
-            {"error": f"Error al consultar Strava: {str(exc)}"},
-            status_code=502,
-        )
-    except RuntimeError as exc:
-        return JSONResponse(
-            {"error": str(exc)},
-            status_code=500,
-        )
-
-
-@app.get("/analysis")
-def analysis(request: Request):
-    acts = _get_activities(request)
-    if isinstance(acts, JSONResponse):
-        return acts
-
-    now = datetime.now(timezone.utc)
-
-    def in_last_days(activity: dict[str, Any], days: int) -> bool:
-        dt = _parse_strava_dt(activity.get("start_date", "1970-01-01T00:00:00Z"))
-        return dt >= (now - timedelta(days=days))
-
-    def is_run(activity: dict[str, Any]) -> bool:
-        return activity.get("type") == "Run"
-
-    def summarize(days: int):
-        items = [a for a in acts if is_run(a) and in_last_days(a, days)]
-        total_time = sum(a.get("moving_time", 0) or 0 for a in items)
-        total_dist = sum(a.get("distance", 0) or 0 for a in items)
-        sessions = len(items)
-        return (
-            {
-                "days": days,
-                "sessions": sessions,
-                "time_h": round(total_time / 3600, 2),
-                "distance_km": round(total_dist / 1000, 2),
-            },
-            items,
-        )
-
-    s7, _runs7 = summarize(7)
-    s14, _runs14 = summarize(14)
-    s28, runs28 = summarize(28)
-
-    long_run_km = 0.0
-    long_run_date = None
-    if runs28:
-        best = max(runs28, key=lambda a: a.get("distance", 0) or 0)
-        long_run_km = round((best.get("distance", 0) or 0) / 1000, 2)
-        long_run_date = best.get("start_date")
-
-    weekly_avg_km = (s28["distance_km"] / 4.0) if s28["distance_km"] else 0.0
-    km7 = s7["distance_km"]
-
-    if weekly_avg_km == 0:
-        semaforo = "⚪ Insuficiente"
-        ajuste = "No hay suficiente running en 28 días para evaluar preparación maratón."
-    else:
-        ratio = km7 / weekly_avg_km
-        if ratio <= 1.10:
-            semaforo = "🟢 Verde"
-            ajuste = "Carga de running alineada con tu media. Mantén estructura y calidad."
-        elif ratio <= 1.25:
-            semaforo = "🟡 Amarillo"
-            ajuste = "Carga algo por encima de tu media. Vigila recuperación y sueño."
-        else:
-            semaforo = "🔴 Rojo"
-            ajuste = "Pico de carga vs tu media. Considera semana de descarga o recorte del 15–30%."
-
-    prediction = {"estimate": "3:33", "range": "3:30–3:37"}
-
-    return JSONResponse(
-        {
-            "sport": "Run",
-            "window_7d": s7,
-            "window_14d": s14,
-            "window_28d": s28,
-            "long_run_28d_km": long_run_km,
-            "long_run_28d_date": long_run_date,
-            "weekly_avg_km_from_28d": round(weekly_avg_km, 2),
-            "semaforo": semaforo,
-            "ajuste": ajuste,
-            "prediction": prediction,
-            "note": "Esto evalúa SOLO running. Bici/natación no están sumadas aquí a propósito para objetivo maratón.",
-        }
-    )
-
-
-@app.get("/dashboard", response_class=HTMLResponse)
+@app.get("/dashboard")
 def dashboard(request: Request):
-    response = analysis(request)
-    data = json.loads(response.body.decode("utf-8"))
-
-    if "error" in data:
-        return HTMLResponse(
-            """
-            <html>
-              <body style="font-family:-apple-system, BlinkMacSystemFont, sans-serif;padding:40px">
-                <h2>SecondCoach</h2>
-                <p>No estás conectado a Strava.</p>
-                <a href="/login">Conectar con Strava</a>
-              </body>
-            </html>
-            """
-        )
-
-    km7 = data["window_7d"]["distance_km"]
-    km14 = data["window_14d"]["distance_km"]
-    km28 = data["window_28d"]["distance_km"]
-    avg_week = data["weekly_avg_km_from_28d"]
-    long_km = data["long_run_28d_km"]
-    sem = data["semaforo"]
-    ajuste = data["ajuste"]
-
-    pb_min = _to_minutes(PB_MARATHON)
-    target_min = _to_minutes(MARATHON_TARGET)
-
-    vol_bonus = min(max(avg_week - 45, 0), 20) * 0.25
-    lr_bonus = min(max(long_km - 24, 0), 6) * 0.5
-    freq_penalty = 2 if data["window_7d"]["sessions"] <= 3 else 0
-
-    pred_min = pb_min - vol_bonus - lr_bonus + freq_penalty
-    low = int(round(pred_min - 3))
-    high = int(round(pred_min + 4))
-    pred_range = f"{_fmt(low)}–{_fmt(high)}"
-    pred_point = _fmt(int(round(pred_min)))
-    pred_status = (
-        "✔ Objetivo 3:30 en rango"
-        if pred_min <= target_min
-        else "⚠ Objetivo 3:30 exigente (aún)"
-    )
-
-    html = f"""
-    <html>
-    <head>
-      <meta name="viewport" content="width=device-width, initial-scale=1">
-      <title>SecondCoach</title>
-      <style>
-        body {{ font-family:-apple-system, BlinkMacSystemFont, sans-serif; padding: 18px; max-width: 720px; margin: 0 auto; }}
-        .card {{ border: 1px solid #eee; border-radius: 14px; padding: 16px; margin: 12px 0; box-shadow: 0 2px 10px rgba(0,0,0,0.04); }}
-        .muted {{ color: #666; }}
-        .big {{ font-size: 20px; }}
-        .row {{ display:flex; gap: 10px; flex-wrap: wrap; }}
-        .pill {{ display:inline-block; padding: 6px 10px; border-radius: 999px; background: #f5f5f5; }}
-        a.btn {{ display:inline-block; padding: 10px 12px; border-radius: 12px; border: 1px solid #ddd; text-decoration:none; color:#111; }}
-      </style>
-    </head>
-    <body>
-      <div class="card">
-        <div style="font-size:26px;margin:0 0 6px 0;"><b>SecondCoach</b></div>
-        <div class="muted">Modo maratón · Objetivo {MARATHON_DATE} · {MARATHON_TARGET} (ritmo ~4:58/km)</div>
-        <div class="muted">PB maratón: {PB_MARATHON}</div>
-      </div>
-
-      <div class="card">
-        <div class="big"><b>Estado de carga (running)</b></div>
-        <div style="margin-top:8px" class="pill">{sem}</div>
-        <div style="margin-top:10px">{ajuste}</div>
-      </div>
-
-      <div class="card">
-        <div class="big"><b>Volumen</b></div>
-        <div class="row" style="margin-top:10px">
-          <div class="pill">7d: {km7:.1f} km</div>
-          <div class="pill">14d: {km14:.1f} km</div>
-          <div class="pill">28d: {km28:.1f} km</div>
-          <div class="pill">Media: {avg_week:.1f} km/sem</div>
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="big"><b>Tirada larga</b></div>
-        <div style="margin-top:10px" class="pill">{long_km:.1f} km (últimos 28 días)</div>
-      </div>
-
-      <div class="card">
-        <div class="big"><b>Predicción maratón {MARATHON_DATE}</b></div>
-        <div class="row" style="margin-top:10px">
-          <div class="pill">Estimación: {pred_point}</div>
-          <div class="pill">Rango: {pred_range}</div>
-        </div>
-        <div style="margin-top:10px"><b>{pred_status}</b></div>
-        <div class="muted" style="margin-top:6px">
-          Heurística MVP: PB {PB_MARATHON} ajustado por volumen ({avg_week:.1f} km/sem) y tirada larga ({long_km:.1f} km).
-        </div>
-      </div>
-
-      <div class="card">
-        <a class="btn" href="/analysis">Ver JSON</a>
-        <a class="btn" href="/login">Reautorizar Strava</a>
-      </div>
-
-      <div class="muted" style="margin-top:14px">
-        Nota: esta pantalla evalúa SOLO running. Bici/natación no se suman aquí a propósito para objetivo maratón.
-      </div>
-    </body>
-    </html>
-    """
-    return HTMLResponse(html)
-
-
-@app.get("/marathon_pace")
-def marathon_pace(request: Request):
-    acts = _get_activities(request)
-    if isinstance(acts, JSONResponse):
-        return acts
-
-    now = datetime.now(timezone.utc)
-
-    def in_last_days(activity: dict[str, Any], days: int) -> bool:
-        dt = _parse_strava_dt(activity.get("start_date", "1970-01-01T00:00:00Z"))
-        return dt >= (now - timedelta(days=days))
-
-    pace_low_s = 4 * 60 + 45
-    pace_high_s = 5 * 60 + 5
-
-    speed_high = 1000 / pace_low_s
-    speed_low = 1000 / pace_high_s
-
-    km_in_zone = 0.0
-    sessions_in_zone = 0
-    longest_in_zone_km = 0.0
-    longest_in_zone_date = None
-    considered = 0
-
-    for activity in acts:
-        if activity.get("type") != "Run":
-            continue
-        if not in_last_days(activity, 28):
-            continue
-
-        dist_km = (activity.get("distance", 0) or 0) / 1000
-        avg_speed = activity.get("average_speed")
-
-        if dist_km < 5 or not avg_speed:
-            continue
-
-        considered += 1
-
-        if speed_low <= avg_speed <= speed_high:
-            km_in_zone += dist_km
-            sessions_in_zone += 1
-            if dist_km > longest_in_zone_km:
-                longest_in_zone_km = dist_km
-                longest_in_zone_date = activity.get("start_date")
-
-    return JSONResponse(
-        {
-            "window_days": 28,
-            "zone_pace_min_km": "4:45–5:05",
-            "runs_considered": considered,
-            "sessions_in_zone": sessions_in_zone,
-            "km_in_zone": round(km_in_zone, 2),
-            "longest_run_in_zone_km": round(longest_in_zone_km, 2),
-            "longest_run_in_zone_date": longest_in_zone_date,
-            "note": "Heurística MVP: usa el ritmo medio del entrenamiento (average_speed). No detecta segmentos internos.",
-        }
-    )
-
-
-@app.get("/share")
-def share(request: Request):
-    resp = analysis(request)
-    data = json.loads(resp.body.decode("utf-8"))
-
-    html = f"""
-    <html>
-    <head>
-        <title>SecondCoach</title>
-        <style>
-            body {{ font-family: Arial; padding:40px; background:#f5f5f5 }}
-            .card {{ background:white; padding:30px; border-radius:10px; max-width:520px }}
-            h1 {{ margin-top: 0 }}
-        </style>
-    </head>
-    <body>
-        <div class="card">
-            <h1>SecondCoach</h1>
-            <p><b>Predicción maratón:</b> {data.get('prediction', {}).get('estimate', 'calculando...')}</p>
-            <p><b>Rango:</b> {data.get('prediction', {}).get('range', 'calculando...')}</p>
-            <p><b>Media semanal:</b> {data.get('weekly_avg_km_from_28d', 'calculando...')} km/sem</p>
-            <p><b>Tirada larga:</b> {data.get('long_run_28d_km', 'calculando...')} km</p>
-        </div>
-    </body>
-    </html>
-    """
-    return HTMLResponse(html)
-
-
-@app.get("/share.png")
-def share_png(request: Request):
-    resp = analysis(request)
-    data = json.loads(resp.body.decode("utf-8"))
-
-    pred_est = data.get("prediction", {}).get("estimate", "--")
-    pred_rng = data.get("prediction", {}).get("range", "--")
-    weekly = data.get("weekly_avg_km_from_28d", "--")
-    longrun = data.get("long_run_28d_km", "--")
-
-    img = Image.new("RGB", (800, 450), "white")
-    draw = ImageDraw.Draw(img)
-
-    font_title = ImageFont.load_default()
-    font_text = ImageFont.load_default()
-
-    draw.text((40, 40), "SecondCoach", fill="black", font=font_title)
-    draw.text((40, 140), f"Predicción maratón: {pred_est}", fill="black", font=font_text)
-    draw.text((40, 200), f"Rango: {pred_rng}", fill="black", font=font_text)
-    draw.text((40, 260), f"Media semanal: {weekly} km", fill="black", font=font_text)
-    draw.text((40, 320), f"Tirada larga: {longrun} km", fill="black", font=font_text)
-
-    buffer = io.BytesIO()
-    img.save(buffer, format="PNG")
-
-    return Response(buffer.getvalue(), media_type="image/png")
-
-
-@app.get("/me")
-def me(request: Request):
     user = get_current_user(request)
 
     if not user:
-        return {"logged": False}
+        return HTMLResponse("<a href='/login'>Login con Strava</a>")
 
-    return {
-        "logged": True,
-        "athlete_id": user["strava_athlete_id"],
-        "firstname": user["firstname"],
-        "lastname": user["lastname"],
-        "token_expires_at": user["expires_at"],
-    }
+    user = refresh_access_token_if_needed(user)
 
-
-if __name__ == "__main__":
-    import os
-    import uvicorn
-
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run("backend.main:app", host="0.0.0.0", port=port)
-
-@app.get("/p/{athlete_id}", response_class=HTMLResponse)
-def public_profile(athlete_id: int):
-    user = get_user_by_athlete_id(athlete_id)
-
-    if not user:
-        return HTMLResponse("<h1>Runner no encontrado</h1>")
-
-    try:
-        user = refresh_access_token_if_needed(user)
-        headers = {"Authorization": f"Bearer {user['access_token']}"}
-
-        response = requests.get(
-            ACTIVITIES_URL,
-            headers=headers,
-            params={"per_page": 200},
-            timeout=30,
+    analysis, error = get_common_analysis(request, user)
+    if error == "rate_limited":
+        return HTMLResponse(
+            "<h1>Strava está limitando temporalmente las peticiones (429)</h1>"
+            "<p>Espera unos minutos y recarga el dashboard.</p>",
+            status_code=429,
         )
-        response.raise_for_status()
-        acts = response.json()
-
-        if not isinstance(acts, list):
-            return HTMLResponse("<h1>No se pudo cargar el análisis</h1>")
-
-    except Exception:
-        return HTMLResponse("<h1>No se pudo cargar el análisis</h1>")
-
-    now = datetime.now(timezone.utc)
-
-    def in_last_days(activity: dict[str, Any], days: int) -> bool:
-        dt = _parse_strava_dt(activity.get("start_date", "1970-01-01T00:00:00Z"))
-        return dt >= (now - timedelta(days=days))
-
-    def is_run(activity: dict[str, Any]) -> bool:
-        return activity.get("type") == "Run"
-
-    def summarize(days: int):
-        items = [a for a in acts if is_run(a) and in_last_days(a, days)]
-        total_time = sum(a.get("moving_time", 0) or 0 for a in items)
-        total_dist = sum(a.get("distance", 0) or 0 for a in items)
-        sessions = len(items)
-        return {
-            "days": days,
-            "sessions": sessions,
-            "time_h": round(total_time / 3600, 2),
-            "distance_km": round(total_dist / 1000, 2),
-        }, items
-
-    s7, _runs7 = summarize(7)
-    s28, runs28 = summarize(28)
-
-    long_run_km = 0.0
-    if runs28:
-        best = max(runs28, key=lambda a: a.get("distance", 0) or 0)
-        long_run_km = round((best.get("distance", 0) or 0) / 1000, 2)
-
-    weekly_avg_km = round((s28["distance_km"] / 4.0), 2) if s28["distance_km"] else 0.0
-    km7 = s7["distance_km"]
-
-    if weekly_avg_km == 0:
-        semaforo = "⚪ Insuficiente"
-    else:
-        ratio = km7 / weekly_avg_km
-        if ratio <= 1.10:
-            semaforo = "🟢 Verde"
-        elif ratio <= 1.25:
-            semaforo = "🟡 Amarillo"
-        else:
-            semaforo = "🔴 Rojo"
-
-    pb_min = _to_minutes(PB_MARATHON)
-    target_min = _to_minutes(MARATHON_TARGET)
-
-    vol_bonus = min(max(weekly_avg_km - 45, 0), 20) * 0.25
-    lr_bonus = min(max(long_run_km - 24, 0), 6) * 0.5
-    freq_penalty = 2 if s7["sessions"] <= 3 else 0
-
-    pred_min = pb_min - vol_bonus - lr_bonus + freq_penalty
-    low = int(round(pred_min - 3))
-    high = int(round(pred_min + 4))
-    pred_point = _fmt(int(round(pred_min)))
-    pred_range = f"{_fmt(low)}–{_fmt(high)}"
 
     html = f"""
     <html>
@@ -854,44 +354,17 @@ def public_profile(athlete_id: int):
         <title>SecondCoach</title>
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <style>
-            body {{
-                font-family:-apple-system,BlinkMacSystemFont,sans-serif;
-                padding:30px;
-                background:#f5f5f5;
-                color:#111;
-            }}
-            .card {{
-                background:white;
-                padding:30px;
-                border-radius:16px;
-                max-width:560px;
-                margin:auto;
-                box-shadow: 0 2px 10px rgba(0,0,0,0.04);
-                border: 1px solid #eee;
-            }}
-            h1 {{
-                margin-top:0;
-                font-size: 40px;
-            }}
-            .pill {{
+            body {{ font-family: Arial, sans-serif; background:#f5f5f5; padding:40px; }}
+            .card {{ background:white; padding:30px; border-radius:12px; max-width:900px; }}
+            .button {{
                 display:inline-block;
-                padding:8px 12px;
-                background:#eee;
-                border-radius:999px;
-                margin:5px 5px 0 0;
-            }}
-            .muted {{
-                color:#666;
-            }}
-            .cta {{
-                display:inline-block;
-                margin-top:20px;
-                padding:12px 16px;
-                border-radius:12px;
-                background:#fc4c02;
-                color:white;
+                margin-top:16px;
+                padding:12px 18px;
+                border-radius:10px;
                 text-decoration:none;
-                font-weight:700;
+                background:#ff5a1f;
+                color:white;
+                font-weight:bold;
             }}
         </style>
     </head>
@@ -899,23 +372,354 @@ def public_profile(athlete_id: int):
         <div class="card">
             <h1>SecondCoach</h1>
 
-            <p><b>Runner:</b> {user["firstname"]} {user["lastname"]}</p>
+            <p>{RACE_NAMES[analysis["race_type"]]} · {analysis["race_date"]} · Objetivo {analysis["goal_time"]}</p>
 
-            <p><b>Predicción maratón:</b> {pred_point}</p>
-            <p><b>Rango:</b> {pred_range}</p>
+            <h2>Predicción</h2>
+            <p>{analysis["pred_time"]} (≈ {analysis["pace_min"]}:{analysis["pace_sec"]:02d}/km)</p>
+            <p>Rango {_fmt(analysis["low"])} – {_fmt(analysis["high"])}</p>
 
-            <div class="pill">Media semanal: {weekly_avg_km} km</div>
-            <div class="pill">Tirada larga: {long_run_km} km</div>
-            <div class="pill">Estado: {semaforo}</div>
+            <h3>Entrenamiento</h3>
+            <p>Últimos 7 días: {analysis["km_7"]:.1f} km</p>
+            <p>Media semanal: {analysis["avg_week"]:.1f} km</p>
+            <p>Tirada larga: {analysis["long_km"]:.1f} km</p>
+            <p>Bloques de calidad detectados: {len(analysis["quality_blocks"])}</p>
+            <p>Bloques por series/laps cerca de ritmo maratón: {len(analysis["lap_blocks"])}</p>
 
-            <p class="muted" style="margin-top:20px;">
-                Análisis generado a partir de actividad reciente en Strava.
-            </p>
+            <h3>Recomendación del coach</h3>
+            <p>{analysis["coach_message"]}</p>
+            <ul>
+                <li>Media semanal actual: {analysis["avg_week"]:.1f} km. Objetivo recomendado: {analysis["target_weekly"]} km.</li>
+                <li>Tirada larga actual: {analysis["long_km"]:.1f} km. Recomendación: {analysis["target_long"]} km.</li>
+                <li>{analysis["coach_detail"]}</li>
+            </ul>
 
-            <a class="cta" href="/">Analiza tu entrenamiento</a>
+            <a class="button" href="/share.png">Compartir predicción</a>
         </div>
     </body>
     </html>
     """
 
     return HTMLResponse(html)
+
+
+@app.get("/share.png")
+def share_png(request: Request):
+    user = get_current_user(request)
+
+    if not user:
+        return HTMLResponse("<h1>No session in /share.png</h1>", status_code=401)
+
+    user = refresh_access_token_if_needed(user)
+
+    analysis, error = get_common_analysis(request, user)
+    if error == "rate_limited":
+        return HTMLResponse(
+            "<h1>Strava está limitando temporalmente las peticiones (429)</h1>"
+            "<p>Espera unos minutos y vuelve a generar la tarjeta.</p>",
+            status_code=429,
+        )
+
+    img = Image.new("RGB", (1200, 630), "white")
+    draw = ImageDraw.Draw(img)
+
+    try:
+        brand_font = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial Bold.ttf", 34)
+        question_font = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial Bold.ttf", 58)
+        big_font = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial Bold.ttf", 112)
+        text_font = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial.ttf", 34)
+        strong_font = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial Bold.ttf", 38)
+        small_font = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial.ttf", 28)
+    except Exception:
+        brand_font = ImageFont.load_default()
+        question_font = ImageFont.load_default()
+        big_font = ImageFont.load_default()
+        text_font = ImageFont.load_default()
+        strong_font = ImageFont.load_default()
+        small_font = ImageFont.load_default()
+
+    draw.rounded_rectangle((30, 30, 1170, 600), radius=28, outline="#E8E8E8", width=3, fill="white")
+    draw.rectangle((30, 30, 1170, 95), fill="#FC5200")
+
+    draw.text((70, 45), "SecondCoach", fill="white", font=brand_font)
+
+    draw.text(
+        (70, 135),
+        f"¿Estoy listo para {analysis['goal_time']}?",
+        fill="black",
+        font=question_font,
+    )
+    draw.text((70, 235), "SecondCoach dice:", fill="#444444", font=text_font)
+    draw.text((70, 290), analysis["pred_time"], fill="black", font=big_font)
+
+    draw.text(
+        (430, 330),
+        f"{analysis['probability']}%",
+        fill="#FC5200",
+        font=strong_font,
+    )
+    draw.text((430, 375), "probabilidad", fill="#666666", font=small_font)
+
+    draw.text(
+        (70, 470),
+        f"{RACE_NAMES[analysis['race_type']]} · {analysis['race_date']}",
+        fill="#444444",
+        font=text_font,
+    )
+    draw.text((70, 525), "Analiza tu Strava en", fill="#777777", font=small_font)
+    draw.text((70, 555), "secondcoach.onrender.com", fill="#FC5200", font=strong_font)
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+
+    return Response(content=buf.getvalue(), media_type="image/png")
+
+
+@app.get("/api/dashboard")
+def api_dashboard(request: Request):
+    user = get_current_user(request)
+
+    if not user:
+        return {"error": "not_authenticated"}
+
+    user = refresh_access_token_if_needed(user)
+
+    analysis, error = get_common_analysis(request, user)
+    if error == "rate_limited":
+        return {"error": "strava_rate_limited"}
+
+    return {
+        "race": {
+            "type": analysis["race_type"],
+            "name": RACE_NAMES[analysis["race_type"]],
+            "date": analysis["race_date"],
+            "goal_time": analysis["goal_time"],
+        },
+        "prediction": {
+            "predicted_time": analysis["pred_time"],
+            "range_low": _fmt(analysis["low"]),
+            "range_high": _fmt(analysis["high"]),
+            "pace_per_km": f"{analysis['pace_min']}:{analysis['pace_sec']:02d}",
+        },
+        "training": {
+            "km_last_7_days": analysis["km_7"],
+            "weekly_average": analysis["avg_week"],
+            "long_run": analysis["long_km"],
+            "quality_blocks_count": len(analysis["quality_blocks"]),
+            "goal_pace_lap_blocks_count": len(analysis["lap_blocks"]),
+            "goal_pace_lap_blocks_km": analysis["lap_block_km"],
+        },
+        "coach": {
+            "message": analysis["coach_message"],
+            "detail": analysis["coach_detail"],
+            "recommended_weekly_km": analysis["target_weekly"],
+            "recommended_long_run_km": analysis["target_long"],
+        },
+    }
+
+
+@app.get("/api/coach")
+def api_coach(request: Request):
+    user = get_current_user(request)
+
+    if not user:
+        return {"error": "not_authenticated"}
+
+    user = refresh_access_token_if_needed(user)
+
+    analysis, error = get_common_analysis(request, user)
+    if error == "rate_limited":
+        return {"error": "strava_rate_limited"}
+
+    missing_weekly = max(0.0, round(analysis["target_weekly"] - analysis["avg_week"], 1))
+    missing_long = max(0.0, round(analysis["target_long"] - analysis["long_km"], 1))
+
+    if analysis["lap_block_km"] < 5:
+        status = "yellow"
+        summary = "Te falta más exposición a ritmo objetivo."
+        explanation = (
+            f"Llevas {analysis['lap_block_km']:.1f} km en bloques por series/laps cerca de ritmo maratón. "
+            f"Para consolidar {analysis['goal_time']}, intenta acumular 10–15 km por semana cerca de tu ritmo objetivo."
+        )
+    elif analysis["lap_block_km"] < 12:
+        status = "green"
+        summary = "Vas construyendo bien el ritmo objetivo."
+        explanation = (
+            f"Ya acumulas {analysis['lap_block_km']:.1f} km recientes cerca del ritmo objetivo. "
+            f"Estás en buena línea, aunque todavía puedes consolidarlo con más continuidad."
+        )
+    else:
+        status = "green"
+        summary = "Tu trabajo específico va en buena dirección."
+        explanation = (
+            f"Acumulas {analysis['lap_block_km']:.1f} km recientes en bloques por series/laps cerca del ritmo objetivo, "
+            f"una señal fuerte de preparación para {analysis['goal_time']}."
+        )
+
+    return {
+        "status": status,
+        "summary": summary,
+        "explanation": explanation,
+        "metrics": {
+            "weekly_average_km": analysis["avg_week"],
+            "long_run_km": analysis["long_km"],
+            "goal_pace_block_km": analysis["lap_block_km"],
+            "goal_pace_block_count": len(analysis["lap_blocks"]),
+            "km_last_7_days": analysis["km_7"],
+        },
+        "gaps": {
+            "weekly_km_missing": missing_weekly,
+            "long_run_km_missing": missing_long,
+        },
+        "next_steps": {
+            "conservative": (
+                f"Sube hacia {analysis['target_weekly']} km/sem de forma gradual y acerca la tirada larga a {analysis['target_long']} km."
+            ),
+            "aggressive": (
+                "Mantén el volumen actual y añade un bloque semanal de 6–10 km cerca de ritmo objetivo."
+            ),
+        },
+    }
+
+
+@app.get("/api/analysis")
+def api_analysis(request: Request):
+    user = get_current_user(request)
+
+    if not user:
+        return {"error": "not_authenticated"}
+
+    user = refresh_access_token_if_needed(user)
+
+    analysis, error = get_common_analysis(request, user)
+    if error == "rate_limited":
+        return {"error": "strava_rate_limited"}
+
+    return {
+        "race": {
+            "type": analysis["race_type"],
+            "name": RACE_NAMES[analysis["race_type"]],
+            "date": analysis["race_date"],
+            "goal_time": analysis["goal_time"],
+        },
+        "status": {
+            "readiness": analysis["readiness"],
+            "readiness_label": analysis["readiness_label"],
+            "specificity": analysis["specificity"],
+        },
+        "prediction": {
+            "predicted_time": analysis["pred_time"],
+            "range_low": _fmt(analysis["low"]),
+            "range_high": _fmt(analysis["high"]),
+            "minutes_vs_goal": analysis["diff"],
+        },
+        "training": {
+            "km_last_7_days": analysis["km_7"],
+            "weekly_average_km": analysis["avg_week"],
+            "long_run_km": analysis["long_km"],
+            "quality_blocks_count": len(analysis["quality_blocks"]),
+            "goal_pace_block_km": analysis["lap_block_km"],
+            "goal_pace_block_count": len(analysis["lap_blocks"]),
+        },
+        "coach": {
+            "positive": (
+                f"Acumulas {analysis['lap_block_km']:.1f} km recientes cerca del ritmo objetivo."
+                if analysis["lap_block_km"] > 0
+                else "Ya tienes base de entrenamiento para seguir construyendo."
+            ),
+            "limiter": (
+                f"Te faltan {max(0, round(analysis['target_weekly'] - analysis['avg_week'], 1)):.1f} km/sem "
+                "para llegar al volumen recomendado."
+            ),
+            "next_focus": (
+                f"Acerca la tirada larga a {analysis['target_long']} km y mantén un bloque semanal de ritmo objetivo."
+            ),
+        },
+    }
+
+
+@app.get("/api/share")
+def api_share(request: Request):
+    user = get_current_user(request)
+
+    if not user:
+        return {"error": "not_authenticated"}
+
+    race_type = request.session.get("race_type", "marathon")
+    goal_time = request.session.get("goal_time", "3:30")
+    race_date = request.session.get("race_date", "2026-04-12")
+
+    base_url = str(request.base_url).rstrip("/")
+
+    return {
+        "race": {
+            "type": race_type,
+            "name": RACE_NAMES[race_type],
+            "date": race_date,
+            "goal_time": goal_time,
+        },
+        "share_image_url": f"{base_url}/share.png",
+        "share_page_url": f"{base_url}/dashboard",
+        "cta": "Comparte tu predicción de SecondCoach",
+    }
+
+
+@app.get("/api/bootstrap")
+def api_bootstrap(request: Request):
+    user = get_current_user(request)
+
+    if not user:
+        return {"error": "not_authenticated"}
+
+    user = refresh_access_token_if_needed(user)
+
+    analysis, error = get_common_analysis(request, user)
+    if error == "rate_limited":
+        return {"error": "strava_rate_limited"}
+
+    base_url = str(request.base_url).rstrip("/")
+
+    return {
+        "race": {
+            "type": analysis["race_type"],
+            "name": RACE_NAMES[analysis["race_type"]],
+            "date": analysis["race_date"],
+            "goal_time": analysis["goal_time"],
+        },
+        "prediction": {
+            "predicted_time": analysis["pred_time"],
+            "range_low": _fmt(analysis["low"]),
+            "range_high": _fmt(analysis["high"]),
+            "pace_per_km": f"{analysis['pace_min']}:{analysis['pace_sec']:02d}",
+            "minutes_vs_goal": analysis["diff"],
+        },
+        "training": {
+            "km_last_7_days": analysis["km_7"],
+            "weekly_average_km": analysis["avg_week"],
+            "long_run_km": analysis["long_km"],
+            "quality_blocks_count": len(analysis["quality_blocks"]),
+            "goal_pace_block_count": len(analysis["lap_blocks"]),
+            "goal_pace_block_km": analysis["lap_block_km"],
+        },
+        "coach": {
+            "message": analysis["coach_message"],
+            "detail": analysis["coach_detail"],
+            "recommended_weekly_km": analysis["target_weekly"],
+            "recommended_long_run_km": analysis["target_long"],
+        },
+        "status": {
+            "readiness": analysis["readiness"],
+            "readiness_label": analysis["readiness_label"],
+            "specificity": analysis["specificity"],
+        },
+        "share": {
+            "share_image_url": f"{base_url}/share.png",
+            "share_page_url": f"{base_url}/dashboard",
+            "cta": "Comparte tu predicción de SecondCoach",
+        },
+    }
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
