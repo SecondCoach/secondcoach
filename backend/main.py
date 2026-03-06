@@ -1,40 +1,231 @@
-from fastapi import FastAPI
-from fastapi.responses import RedirectResponse, JSONResponse, HTMLResponse
+from datetime import datetime, timedelta, timezone
+import io
+import json
+import sqlite3
+from pathlib import Path
+from typing import Any
+
 import requests
-from datetime import datetime, timezone, timedelta
-from backend.settings import settings as settings
+from fastapi import FastAPI
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from PIL import Image, ImageDraw, ImageFont
+
+from backend.settings import settings
 
 app = FastAPI()
 
-# --- Strava OAuth config ---
-CLIENT_ID = settings.STRAVA_CLIENT_ID
-CLIENT_SECRET = settings.STRAVA_CLIENT_SECRET
-REDIRECT_URI = settings.STRAVA_REDIRECT_URI
+# --- Paths / DB ---
+BASE_DIR = Path(__file__).resolve().parent.parent
+DB_PATH = BASE_DIR / "secondcoach.db"
 
+# --- Strava OAuth / API config ---
 TOKEN_URL = "https://www.strava.com/oauth/token"
 ACTIVITIES_URL = "https://www.strava.com/api/v3/athlete/activities"
+ATHLETE_URL = "https://www.strava.com/api/v3/athlete"
 
-# NOTE: MVP stores token in-memory. Restart/reload => re-login needed.
-access_token = None
+# NOTE: Aún MVP: mantenemos sesión simple en memoria.
+# La persistencia ya queda guardada en SQLite para no perder tokens al reiniciar.
+current_athlete_id: int | None = None
 
-# --- Marathon context (your current goal) ---
+# --- Marathon context (current goal) ---
 MARATHON_DATE = "2026-04-12"
-MARATHON_TARGET = "3:30"   # hh:mm
-PB_MARATHON = "3:34"       # hh:mm
+MARATHON_TARGET = "3:30"  # hh:mm
+PB_MARATHON = "3:34"      # hh:mm
+
+
+def get_db() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_db() -> None:
+    conn = get_db()
+    try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                strava_athlete_id INTEGER NOT NULL UNIQUE,
+                access_token TEXT NOT NULL,
+                refresh_token TEXT,
+                expires_at INTEGER,
+                firstname TEXT,
+                lastname TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+@app.on_event("startup")
+def on_startup() -> None:
+    init_db()
+
+
+def upsert_user_token(token_data: dict[str, Any], athlete_data: dict[str, Any]) -> int:
+    athlete_id = athlete_data["id"]
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    conn = get_db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO users (
+                strava_athlete_id,
+                access_token,
+                refresh_token,
+                expires_at,
+                firstname,
+                lastname,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(strava_athlete_id) DO UPDATE SET
+                access_token = excluded.access_token,
+                refresh_token = excluded.refresh_token,
+                expires_at = excluded.expires_at,
+                firstname = excluded.firstname,
+                lastname = excluded.lastname,
+                updated_at = excluded.updated_at
+            """,
+            (
+                athlete_id,
+                token_data.get("access_token"),
+                token_data.get("refresh_token"),
+                token_data.get("expires_at"),
+                athlete_data.get("firstname"),
+                athlete_data.get("lastname"),
+                now_iso,
+                now_iso,
+            ),
+        )
+        conn.commit()
+        return athlete_id
+    finally:
+        conn.close()
+
+
+def update_user_tokens(
+    athlete_id: int,
+    access_token: str,
+    refresh_token: str | None,
+    expires_at: int | None,
+) -> None:
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    conn = get_db()
+    try:
+        conn.execute(
+            """
+            UPDATE users
+            SET access_token = ?,
+                refresh_token = ?,
+                expires_at = ?,
+                updated_at = ?
+            WHERE strava_athlete_id = ?
+            """,
+            (access_token, refresh_token, expires_at, now_iso, athlete_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_user_by_athlete_id(athlete_id: int) -> sqlite3.Row | None:
+    conn = get_db()
+    try:
+        row = conn.execute(
+            """
+            SELECT *
+            FROM users
+            WHERE strava_athlete_id = ?
+            """,
+            (athlete_id,),
+        ).fetchone()
+        return row
+    finally:
+        conn.close()
+
+
+def get_current_user() -> sqlite3.Row | None:
+    if current_athlete_id is None:
+        return None
+    return get_user_by_athlete_id(current_athlete_id)
+
+
+def refresh_access_token_if_needed(user: sqlite3.Row) -> sqlite3.Row:
+    athlete_id = user["strava_athlete_id"]
+    refresh_token = user["refresh_token"]
+    expires_at = user["expires_at"]
+
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+    # Refrescamos con margen de 5 minutos para evitar caducar en mitad de petición.
+    should_refresh = (
+        refresh_token
+        and expires_at is not None
+        and int(expires_at) <= now_ts + 300
+    )
+
+    if not should_refresh:
+        return user
+
+    token_response = requests.post(
+        TOKEN_URL,
+        data={
+            "client_id": settings.STRAVA_CLIENT_ID,
+            "client_secret": settings.STRAVA_CLIENT_SECRET,
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+        },
+        timeout=30,
+    )
+    token_response.raise_for_status()
+    token_data = token_response.json()
+
+    new_access_token = token_data.get("access_token")
+    new_refresh_token = token_data.get("refresh_token", refresh_token)
+    new_expires_at = token_data.get("expires_at", expires_at)
+
+    if not new_access_token:
+        raise requests.HTTPError("Strava no devolvió access_token al refrescar el token.")
+
+    update_user_tokens(
+        athlete_id=athlete_id,
+        access_token=new_access_token,
+        refresh_token=new_refresh_token,
+        expires_at=new_expires_at,
+    )
+
+    refreshed_user = get_user_by_athlete_id(athlete_id)
+    if refreshed_user is None:
+        raise RuntimeError("No se pudo recargar el usuario tras refrescar token.")
+
+    return refreshed_user
 
 
 @app.get("/")
-def home():
+def home() -> dict[str, str]:
     return {"status": "SecondCoach backend running"}
+
+
+@app.get("/health")
+def health() -> dict[str, str]:
+    return {"status": "ok"}
 
 
 @app.get("/login")
 def login():
     url = (
         "https://www.strava.com/oauth/authorize"
-        f"?client_id={CLIENT_ID}"
+        f"?client_id={settings.STRAVA_CLIENT_ID}"
         "&response_type=code"
-        f"&redirect_uri={REDIRECT_URI}"
+        f"&redirect_uri={settings.STRAVA_REDIRECT_URI}"
         "&scope=activity:read_all"
     )
     return RedirectResponse(url)
@@ -42,56 +233,123 @@ def login():
 
 @app.get("/callback")
 def callback(code: str):
-    global access_token
-    r = requests.post(
+    global current_athlete_id
+
+    token_response = requests.post(
         TOKEN_URL,
         data={
-            "client_id": CLIENT_ID,
-            "client_secret": CLIENT_SECRET,
+            "client_id": settings.STRAVA_CLIENT_ID,
+            "client_secret": settings.STRAVA_CLIENT_SECRET,
             "code": code,
             "grant_type": "authorization_code",
         },
         timeout=30,
     )
-    data = r.json()
-    access_token = data.get("access_token")
+    token_response.raise_for_status()
+    token_data = token_response.json()
+
+    access_token = token_data.get("access_token")
+    if not access_token:
+        return JSONResponse(
+            {"error": "Strava no devolvió access_token."},
+            status_code=502,
+        )
+
+    athlete_response = requests.get(
+        ATHLETE_URL,
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=30,
+    )
+    athlete_response.raise_for_status()
+    athlete_data = athlete_response.json()
+
+    athlete_id = upsert_user_token(token_data, athlete_data)
+    current_athlete_id = athlete_id
+
     return RedirectResponse("/dashboard")
 
 
-def _parse_strava_dt(s: str) -> datetime:
-    # Strava suele dar: "2026-03-05T12:34:56Z"
-    if s.endswith("Z"):
-        s = s.replace("Z", "+00:00")
-    return datetime.fromisoformat(s)
+def _parse_strava_dt(value: str) -> datetime:
+    if value.endswith("Z"):
+        value = value.replace("Z", "+00:00")
+    return datetime.fromisoformat(value)
+
+
+def _to_minutes(hhmm: str) -> int:
+    h, m = hhmm.split(":")
+    return int(h) * 60 + int(m)
+
+
+def _fmt(mins: int) -> str:
+    h = mins // 60
+    m = mins % 60
+    return f"{h}:{m:02d}"
+
+
+def _unauthorized():
+    return JSONResponse(
+        {"error": "No user session. Ve a /login para autorizar Strava."},
+        status_code=401,
+    )
+
+
+def _get_activities() -> list[dict[str, Any]] | JSONResponse:
+    user = get_current_user()
+    if not user:
+        return _unauthorized()
+
+    try:
+        user = refresh_access_token_if_needed(user)
+        headers = {"Authorization": f"Bearer {user['access_token']}"}
+
+        response = requests.get(
+            ACTIVITIES_URL,
+            headers=headers,
+            params={"per_page": 200},
+            timeout=30,
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        if not isinstance(data, list):
+            return JSONResponse(
+                {"error": "Respuesta inesperada de Strava al pedir actividades."},
+                status_code=502,
+            )
+
+        return data
+
+    except requests.RequestException as exc:
+        return JSONResponse(
+            {"error": f"Error al consultar Strava: {str(exc)}"},
+            status_code=502,
+        )
+    except RuntimeError as exc:
+        return JSONResponse(
+            {"error": str(exc)},
+            status_code=500,
+        )
 
 
 @app.get("/analysis")
 def analysis():
-    if not access_token:
-        return JSONResponse(
-            {"error": "No access_token. Ve a /login para autorizar Strava."},
-            status_code=401,
-        )
-
-    headers = {"Authorization": f"Bearer {access_token}"}
-
-    acts = requests.get(
-        ACTIVITIES_URL, headers=headers, params={"per_page": 200}, timeout=30
-    ).json()
+    acts = _get_activities()
+    if isinstance(acts, JSONResponse):
+        return acts
 
     now = datetime.now(timezone.utc)
 
-    def in_last_days(a, days: int) -> bool:
-        dt = _parse_strava_dt(a.get("start_date", "1970-01-01T00:00:00Z"))
+    def in_last_days(activity: dict[str, Any], days: int) -> bool:
+        dt = _parse_strava_dt(activity.get("start_date", "1970-01-01T00:00:00Z"))
         return dt >= (now - timedelta(days=days))
 
-    def is_run(a) -> bool:
-        return a.get("type") == "Run"
+    def is_run(activity: dict[str, Any]) -> bool:
+        return activity.get("type") == "Run"
 
     def summarize(days: int):
         items = [a for a in acts if is_run(a) and in_last_days(a, days)]
-        total_time = sum(a.get("moving_time", 0) for a in items)  # segundos
-        total_dist = sum(a.get("distance", 0) for a in items)     # metros
+        total_time = sum(a.get("moving_time", 0) or 0 for a in items)
+        total_dist = sum(a.get("distance", 0) or 0 for a in items)
         sessions = len(items)
         return (
             {
@@ -104,14 +362,14 @@ def analysis():
         )
 
     s7, runs7 = summarize(7)
-    s14, runs14 = summarize(14)
+    s14, _runs14 = summarize(14)
     s28, runs28 = summarize(28)
 
     long_run_km = 0.0
     long_run_date = None
     if runs28:
-        best = max(runs28, key=lambda a: a.get("distance", 0))
-        long_run_km = round(best.get("distance", 0) / 1000, 2)
+        best = max(runs28, key=lambda a: a.get("distance", 0) or 0)
+        long_run_km = round((best.get("distance", 0) or 0) / 1000, 2)
         long_run_date = best.get("start_date")
 
     weekly_avg_km = (s28["distance_km"] / 4.0) if s28["distance_km"] else 0.0
@@ -133,6 +391,7 @@ def analysis():
             ajuste = "Pico de carga vs tu media. Considera semana de descarga o recorte del 15–30%."
 
     prediction = {"estimate": "3:33", "range": "3:30–3:37"}
+
     return JSONResponse(
         {
             "sport": "Run",
@@ -144,32 +403,16 @@ def analysis():
             "weekly_avg_km_from_28d": round(weekly_avg_km, 2),
             "semaforo": semaforo,
             "ajuste": ajuste,
-	    "prediction": prediction,
+            "prediction": prediction,
             "note": "Esto evalúa SOLO running. Bici/natación no están sumadas aquí a propósito para objetivo maratón.",
         }
     )
 
 
-def _to_minutes(hhmm: str) -> int:
-    h, m = hhmm.split(":")
-    return int(h) * 60 + int(m)
-
-
-def _fmt(mins: int) -> str:
-    h = mins // 60
-    m = mins % 60
-    return f"{h}:{m:02d}"
-
-
 @app.get("/dashboard", response_class=HTMLResponse)
 def dashboard():
-    import json as _json
-
-    res = analysis()
-    if hasattr(res, "body"):
-        data = _json.loads(res.body.decode("utf-8"))
-    else:
-        data = res
+    response = analysis()
+    data = json.loads(response.body.decode("utf-8"))
 
     if "error" in data:
         return HTMLResponse(
@@ -200,13 +443,15 @@ def dashboard():
     freq_penalty = 2 if data["window_7d"]["sessions"] <= 3 else 0
 
     pred_min = pb_min - vol_bonus - lr_bonus + freq_penalty
-
     low = int(round(pred_min - 3))
     high = int(round(pred_min + 4))
     pred_range = f"{_fmt(low)}–{_fmt(high)}"
     pred_point = _fmt(int(round(pred_min)))
-
-    pred_status = "✔ Objetivo 3:30 en rango" if pred_min <= target_min else "⚠ Objetivo 3:30 exigente (aún)"
+    pred_status = (
+        "✔ Objetivo 3:30 en rango"
+        if pred_min <= target_min
+        else "⚠ Objetivo 3:30 exigente (aún)"
+    )
 
     html = f"""
     <html>
@@ -275,55 +520,41 @@ def dashboard():
     </html>
     """
     return HTMLResponse(html)
+
+
 @app.get("/marathon_pace")
 def marathon_pace():
-    """
-    Detecta km a ritmo maratón objetivo (3:30 ~ 4:58/km) en los últimos 28 días.
-    Heurística MVP: usa average_speed (m/s) de Strava por actividad (no streams).
-    """
-    if not access_token:
-        return JSONResponse(
-            {"error": "No access_token. Ve a /login para autorizar Strava."},
-            status_code=401,
-        )
-
-    headers = {"Authorization": f"Bearer {access_token}"}
-    acts = requests.get(
-        ACTIVITIES_URL, headers=headers, params={"per_page": 200}, timeout=30
-    ).json()
+    acts = _get_activities()
+    if isinstance(acts, JSONResponse):
+        return acts
 
     now = datetime.now(timezone.utc)
 
-    def in_last_days(a, days: int) -> bool:
-        dt = _parse_strava_dt(a.get("start_date", "1970-01-01T00:00:00Z"))
+    def in_last_days(activity: dict[str, Any], days: int) -> bool:
+        dt = _parse_strava_dt(activity.get("start_date", "1970-01-01T00:00:00Z"))
         return dt >= (now - timedelta(days=days))
 
-    # Zona “ritmo maratón” para 3:30 (ajustable)
-    # 4:45–5:05 /km
-    pace_low_s = 4 * 60 + 45   # más rápido
-    pace_high_s = 5 * 60 + 5   # más lento
+    pace_low_s = 4 * 60 + 45
+    pace_high_s = 5 * 60 + 5
 
-    # Convertimos pace (s/km) a speed (m/s): speed = 1000 / pace_s
-    speed_high = 1000 / pace_low_s   # límite superior de velocidad (más rápido)
-    speed_low = 1000 / pace_high_s   # límite inferior de velocidad (más lento)
+    speed_high = 1000 / pace_low_s
+    speed_low = 1000 / pace_high_s
 
     km_in_zone = 0.0
     sessions_in_zone = 0
     longest_in_zone_km = 0.0
     longest_in_zone_date = None
-
     considered = 0
 
-    for a in acts:
-        if a.get("type") != "Run":
+    for activity in acts:
+        if activity.get("type") != "Run":
             continue
-        if not in_last_days(a, 28):
+        if not in_last_days(activity, 28):
             continue
 
-        dist_km = (a.get("distance", 0) or 0) / 1000
-        avg_speed = a.get("average_speed", None)  # m/s
+        dist_km = (activity.get("distance", 0) or 0) / 1000
+        avg_speed = activity.get("average_speed")
 
-        # filtros anti-ruido
         if dist_km < 5 or not avg_speed:
             continue
 
@@ -334,7 +565,7 @@ def marathon_pace():
             sessions_in_zone += 1
             if dist_km > longest_in_zone_km:
                 longest_in_zone_km = dist_km
-                longest_in_zone_date = a.get("start_date")
+                longest_in_zone_date = activity.get("start_date")
 
     return JSONResponse(
         {
@@ -349,28 +580,12 @@ def marathon_pace():
         }
     )
 
+
 @app.get("/share")
 def share():
-    import json
+    resp = analysis()
+    data = json.loads(resp.body.decode("utf-8"))
 
-    # 1) Obtener el JSON real que devuelve /analysis
-    resp = analysis().body
-    raw = resp
-    # 2) Convertir raw -> dict de forma robusta
-    if isinstance(raw, (bytes, bytearray)):
-        raw = raw.decode("utf-8", errors="replace")
-
-    if isinstance(raw, str):
-        try:
-            data = json.loads(raw)
-        except Exception:
-            data = {}
-    elif isinstance(raw, dict):
-        data = raw
-    else:
-        data = {}
-
-    # 3) Pintar HTML
     html = f"""
     <html>
     <head>
@@ -394,25 +609,17 @@ def share():
     """
     return HTMLResponse(html)
 
-from fastapi.responses import Response
-from PIL import Image, ImageDraw, ImageFont
-import io
 
 @app.get("/share.png")
 def share_png():
-
-    import json
-
-    # Obtener datos de /analysis
     resp = analysis()
-    data = json.loads(resp.body)
+    data = json.loads(resp.body.decode("utf-8"))
 
     pred_est = data.get("prediction", {}).get("estimate", "--")
     pred_rng = data.get("prediction", {}).get("range", "--")
-    weekly   = data.get("weekly_avg_km_from_28d", "--")
-    longrun  = data.get("long_run_28d_km", "--")
+    weekly = data.get("weekly_avg_km_from_28d", "--")
+    longrun = data.get("long_run_28d_km", "--")
 
-    # Crear imagen
     img = Image.new("RGB", (800, 450), "white")
     draw = ImageDraw.Draw(img)
 
@@ -420,7 +627,6 @@ def share_png():
     font_text = ImageFont.load_default()
 
     draw.text((40, 40), "SecondCoach", fill="black", font=font_title)
-
     draw.text((40, 140), f"Predicción maratón: {pred_est}", fill="black", font=font_text)
     draw.text((40, 200), f"Rango: {pred_rng}", fill="black", font=font_text)
     draw.text((40, 260), f"Media semanal: {weekly} km", fill="black", font=font_text)
