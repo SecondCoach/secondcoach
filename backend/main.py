@@ -768,19 +768,85 @@ if __name__ == "__main__":
 
 @app.get("/p/{athlete_id}", response_class=HTMLResponse)
 def public_profile(athlete_id: int):
-
     user = get_user_by_athlete_id(athlete_id)
 
     if not user:
         return HTMLResponse("<h1>Runner no encontrado</h1>")
 
-    resp = analysis()
-    data = json.loads(resp.body.decode("utf-8"))
+    try:
+        user = refresh_access_token_if_needed(user)
+        headers = {"Authorization": f"Bearer {user['access_token']}"}
 
-    pred = data.get("prediction", {})
-    weekly = data.get("weekly_avg_km_from_28d", "--")
-    longrun = data.get("long_run_28d_km", "--")
-    semaforo = data.get("semaforo", "--")
+        response = requests.get(
+            ACTIVITIES_URL,
+            headers=headers,
+            params={"per_page": 200},
+            timeout=30,
+        )
+        response.raise_for_status()
+        acts = response.json()
+
+        if not isinstance(acts, list):
+            return HTMLResponse("<h1>No se pudo cargar el análisis</h1>")
+
+    except Exception:
+        return HTMLResponse("<h1>No se pudo cargar el análisis</h1>")
+
+    now = datetime.now(timezone.utc)
+
+    def in_last_days(activity: dict[str, Any], days: int) -> bool:
+        dt = _parse_strava_dt(activity.get("start_date", "1970-01-01T00:00:00Z"))
+        return dt >= (now - timedelta(days=days))
+
+    def is_run(activity: dict[str, Any]) -> bool:
+        return activity.get("type") == "Run"
+
+    def summarize(days: int):
+        items = [a for a in acts if is_run(a) and in_last_days(a, days)]
+        total_time = sum(a.get("moving_time", 0) or 0 for a in items)
+        total_dist = sum(a.get("distance", 0) or 0 for a in items)
+        sessions = len(items)
+        return {
+            "days": days,
+            "sessions": sessions,
+            "time_h": round(total_time / 3600, 2),
+            "distance_km": round(total_dist / 1000, 2),
+        }, items
+
+    s7, _runs7 = summarize(7)
+    s28, runs28 = summarize(28)
+
+    long_run_km = 0.0
+    if runs28:
+        best = max(runs28, key=lambda a: a.get("distance", 0) or 0)
+        long_run_km = round((best.get("distance", 0) or 0) / 1000, 2)
+
+    weekly_avg_km = round((s28["distance_km"] / 4.0), 2) if s28["distance_km"] else 0.0
+    km7 = s7["distance_km"]
+
+    if weekly_avg_km == 0:
+        semaforo = "⚪ Insuficiente"
+    else:
+        ratio = km7 / weekly_avg_km
+        if ratio <= 1.10:
+            semaforo = "🟢 Verde"
+        elif ratio <= 1.25:
+            semaforo = "🟡 Amarillo"
+        else:
+            semaforo = "🔴 Rojo"
+
+    pb_min = _to_minutes(PB_MARATHON)
+    target_min = _to_minutes(MARATHON_TARGET)
+
+    vol_bonus = min(max(weekly_avg_km - 45, 0), 20) * 0.25
+    lr_bonus = min(max(long_run_km - 24, 0), 6) * 0.5
+    freq_penalty = 2 if s7["sessions"] <= 3 else 0
+
+    pred_min = pb_min - vol_bonus - lr_bonus + freq_penalty
+    low = int(round(pred_min - 3))
+    high = int(round(pred_min + 4))
+    pred_point = _fmt(int(round(pred_min)))
+    pred_range = f"{_fmt(low)}–{_fmt(high)}"
 
     html = f"""
     <html>
@@ -791,24 +857,41 @@ def public_profile(athlete_id: int):
             body {{
                 font-family:-apple-system,BlinkMacSystemFont,sans-serif;
                 padding:30px;
-                background:#f5f5f5
+                background:#f5f5f5;
+                color:#111;
             }}
             .card {{
                 background:white;
                 padding:30px;
-                border-radius:12px;
-                max-width:500px;
-                margin:auto
+                border-radius:16px;
+                max-width:560px;
+                margin:auto;
+                box-shadow: 0 2px 10px rgba(0,0,0,0.04);
+                border: 1px solid #eee;
             }}
             h1 {{
-                margin-top:0
+                margin-top:0;
+                font-size: 40px;
             }}
             .pill {{
                 display:inline-block;
-                padding:6px 10px;
+                padding:8px 12px;
                 background:#eee;
                 border-radius:999px;
-                margin:5px
+                margin:5px 5px 0 0;
+            }}
+            .muted {{
+                color:#666;
+            }}
+            .cta {{
+                display:inline-block;
+                margin-top:20px;
+                padding:12px 16px;
+                border-radius:12px;
+                background:#fc4c02;
+                color:white;
+                text-decoration:none;
+                font-weight:700;
             }}
         </style>
     </head>
@@ -816,16 +899,20 @@ def public_profile(athlete_id: int):
         <div class="card">
             <h1>SecondCoach</h1>
 
-            <p><b>Predicción maratón:</b> {pred.get("estimate","--")}</p>
-            <p><b>Rango:</b> {pred.get("range","--")}</p>
+            <p><b>Runner:</b> {user["firstname"]} {user["lastname"]}</p>
 
-            <p class="pill">Media semanal: {weekly} km</p>
-            <p class="pill">Tirada larga: {longrun} km</p>
-            <p class="pill">Estado: {semaforo}</p>
+            <p><b>Predicción maratón:</b> {pred_point}</p>
+            <p><b>Rango:</b> {pred_range}</p>
 
-            <br><br>
+            <div class="pill">Media semanal: {weekly_avg_km} km</div>
+            <div class="pill">Tirada larga: {long_run_km} km</div>
+            <div class="pill">Estado: {semaforo}</div>
 
-            <a href="/">Analiza tu entrenamiento</a>
+            <p class="muted" style="margin-top:20px;">
+                Análisis generado a partir de actividad reciente en Strava.
+            </p>
+
+            <a class="cta" href="/">Analiza tu entrenamiento</a>
         </div>
     </body>
     </html>
