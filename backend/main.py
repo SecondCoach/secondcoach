@@ -636,3 +636,24 @@ def share_png():
     img.save(buffer, format="PNG")
 
     return Response(buffer.getvalue(), media_type="image/png")
+@app.get("/me")
+def me():
+    user = get_current_user()
+
+    if not user:
+        return {"logged": False}
+
+    return {
+        "logged": True,
+        "athlete_id": user["strava_athlete_id"],
+        "firstname": user["firstname"],
+        "lastname": user["lastname"],
+        "token_expires_at": user["expires_at"],
+    }
+@app.get("/healthz")
+def healthz():
+    return {
+        "status": "ok",
+        "service": "secondcoach",
+        "time": datetime.now(timezone.utc).isoformat()
+    }
