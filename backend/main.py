@@ -211,9 +211,105 @@ def refresh_access_token_if_needed(user: sqlite3.Row) -> sqlite3.Row:
     return refreshed_user
 
 
-@app.get("/")
-def home() -> dict[str, str]:
-    return {"status": "SecondCoach backend running"}
+@app.get("/", response_class=HTMLResponse)
+def home():
+    return HTMLResponse(
+        """
+        <html>
+        <head>
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>SecondCoach</title>
+          <style>
+            body {
+              font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+              margin: 0;
+              background: #f7f7f7;
+              color: #111;
+            }
+            .wrap {
+              max-width: 720px;
+              margin: 0 auto;
+              padding: 32px 20px 48px 20px;
+            }
+            .hero {
+              background: white;
+              border: 1px solid #eee;
+              border-radius: 18px;
+              padding: 28px;
+              box-shadow: 0 2px 10px rgba(0,0,0,0.04);
+            }
+            h1 {
+              font-size: 42px;
+              line-height: 1.05;
+              margin: 0 0 14px 0;
+            }
+            .sub {
+              font-size: 22px;
+              line-height: 1.3;
+              margin: 0 0 18px 0;
+            }
+            .muted {
+              color: #666;
+              font-size: 18px;
+              line-height: 1.5;
+            }
+            .cta {
+              display: inline-block;
+              margin-top: 22px;
+              padding: 14px 18px;
+              border-radius: 14px;
+              background: #fc4c02;
+              color: white;
+              text-decoration: none;
+              font-weight: 700;
+            }
+            .card {
+              background: white;
+              border: 1px solid #eee;
+              border-radius: 18px;
+              padding: 22px 24px;
+              margin-top: 18px;
+              box-shadow: 0 2px 10px rgba(0,0,0,0.04);
+            }
+            ul {
+              margin: 12px 0 0 0;
+              padding-left: 20px;
+              line-height: 1.8;
+            }
+            .tiny {
+              margin-top: 16px;
+              color: #777;
+              font-size: 14px;
+            }
+          </style>
+        </head>
+        <body>
+          <div class="wrap">
+            <div class="hero">
+              <h1>SecondCoach</h1>
+              <p class="sub">¿Tu entrenamiento realmente te lleva a tu objetivo?</p>
+              <p class="muted">
+                Conecta tu Strava y descubre en segundos tu estado de carga,
+                tu predicción de maratón y si tu objetivo es realista.
+              </p>
+              <a class="cta" href="/login">Conectar con Strava</a>
+              <div class="tiny">Sin formularios. Sin configurar nada. Entra y mira tu análisis.</div>
+            </div>
+
+            <div class="card">
+              <b>Qué te damos</b>
+              <ul>
+                <li>Estado de carga simple: verde, amarillo o rojo</li>
+                <li>Volumen 7/14/28 días</li>
+                <li>Tirada larga reciente</li>
+                <li>Predicción maratón explicada</li>
+              </ul>
+            </div>
+          </div>
+        </body>
+        </html>
+        """
+    )
 
 
 @app.get("/health")
