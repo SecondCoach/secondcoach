@@ -3,3 +3,4 @@
 __pycache__/
 *.pyc
 .DS_Storesecondcoach.db
+.DS_Store
