@@ -723,3 +723,10 @@ def api_bootstrap(request: Request):
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+@app.get("/debug/users")
+def debug_users():
+    from backend.db import get_conn
+    conn = get_conn()
+    rows = conn.execute("SELECT strava_athlete_id FROM users").fetchall()
+    return {"users": [r["strava_athlete_id"] for r in rows]}
