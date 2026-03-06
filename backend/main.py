@@ -765,3 +765,70 @@ if __name__ == "__main__":
 
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run("backend.main:app", host="0.0.0.0", port=port)
+
+@app.get("/p/{athlete_id}", response_class=HTMLResponse)
+def public_profile(athlete_id: int):
+
+    user = get_user_by_athlete_id(athlete_id)
+
+    if not user:
+        return HTMLResponse("<h1>Runner no encontrado</h1>")
+
+    resp = analysis()
+    data = json.loads(resp.body.decode("utf-8"))
+
+    pred = data.get("prediction", {})
+    weekly = data.get("weekly_avg_km_from_28d", "--")
+    longrun = data.get("long_run_28d_km", "--")
+    semaforo = data.get("semaforo", "--")
+
+    html = f"""
+    <html>
+    <head>
+        <title>SecondCoach</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+            body {{
+                font-family:-apple-system,BlinkMacSystemFont,sans-serif;
+                padding:30px;
+                background:#f5f5f5
+            }}
+            .card {{
+                background:white;
+                padding:30px;
+                border-radius:12px;
+                max-width:500px;
+                margin:auto
+            }}
+            h1 {{
+                margin-top:0
+            }}
+            .pill {{
+                display:inline-block;
+                padding:6px 10px;
+                background:#eee;
+                border-radius:999px;
+                margin:5px
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <h1>SecondCoach</h1>
+
+            <p><b>Predicción maratón:</b> {pred.get("estimate","--")}</p>
+            <p><b>Rango:</b> {pred.get("range","--")}</p>
+
+            <p class="pill">Media semanal: {weekly} km</p>
+            <p class="pill">Tirada larga: {longrun} km</p>
+            <p class="pill">Estado: {semaforo}</p>
+
+            <br><br>
+
+            <a href="/">Analiza tu entrenamiento</a>
+        </div>
+    </body>
+    </html>
+    """
+
+    return HTMLResponse(html)
