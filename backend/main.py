@@ -6,13 +6,19 @@ from pathlib import Path
 from typing import Any
 
 import requests
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from PIL import Image, ImageDraw, ImageFont
+from starlette.middleware.sessions import SessionMiddleware
 
 from backend.settings import settings
 
 app = FastAPI()
+
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=settings.STRAVA_CLIENT_SECRET,
+)
 
 # --- Paths / DB ---
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -22,10 +28,6 @@ DB_PATH = BASE_DIR / "secondcoach.db"
 TOKEN_URL = "https://www.strava.com/oauth/token"
 ACTIVITIES_URL = "https://www.strava.com/api/v3/athlete/activities"
 ATHLETE_URL = "https://www.strava.com/api/v3/athlete"
-
-# NOTE: Aún MVP: mantenemos sesión simple en memoria.
-# La persistencia ya queda guardada en SQLite para no perder tokens al reiniciar.
-current_athlete_id: int | None = None
 
 # --- Marathon context (current goal) ---
 MARATHON_DATE = "2026-04-12"
@@ -153,10 +155,11 @@ def get_user_by_athlete_id(athlete_id: int) -> sqlite3.Row | None:
         conn.close()
 
 
-def get_current_user() -> sqlite3.Row | None:
-    if current_athlete_id is None:
+def get_current_user(request: Request) -> sqlite3.Row | None:
+    athlete_id = request.session.get("athlete_id")
+    if athlete_id is None:
         return None
-    return get_user_by_athlete_id(current_athlete_id)
+    return get_user_by_athlete_id(int(athlete_id))
 
 
 def refresh_access_token_if_needed(user: sqlite3.Row) -> sqlite3.Row:
@@ -165,7 +168,6 @@ def refresh_access_token_if_needed(user: sqlite3.Row) -> sqlite3.Row:
     expires_at = user["expires_at"]
 
     now_ts = int(datetime.now(timezone.utc).timestamp())
-    # Refrescamos con margen de 5 minutos para evitar caducar en mitad de petición.
     should_refresh = (
         refresh_token
         and expires_at is not None
@@ -219,6 +221,15 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/healthz")
+def healthz() -> dict[str, str]:
+    return {
+        "status": "ok",
+        "service": "secondcoach",
+        "time": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 @app.get("/login")
 def login():
     url = (
@@ -232,9 +243,7 @@ def login():
 
 
 @app.get("/callback")
-def callback(code: str):
-    global current_athlete_id
-
+def callback(request: Request, code: str):
     token_response = requests.post(
         TOKEN_URL,
         data={
@@ -264,7 +273,7 @@ def callback(code: str):
     athlete_data = athlete_response.json()
 
     athlete_id = upsert_user_token(token_data, athlete_data)
-    current_athlete_id = athlete_id
+    request.session["athlete_id"] = athlete_id
 
     return RedirectResponse("/dashboard")
 
@@ -293,8 +302,8 @@ def _unauthorized():
     )
 
 
-def _get_activities() -> list[dict[str, Any]] | JSONResponse:
-    user = get_current_user()
+def _get_activities(request: Request) -> list[dict[str, Any]] | JSONResponse:
+    user = get_current_user(request)
     if not user:
         return _unauthorized()
 
@@ -332,8 +341,8 @@ def _get_activities() -> list[dict[str, Any]] | JSONResponse:
 
 
 @app.get("/analysis")
-def analysis():
-    acts = _get_activities()
+def analysis(request: Request):
+    acts = _get_activities(request)
     if isinstance(acts, JSONResponse):
         return acts
 
@@ -361,7 +370,7 @@ def analysis():
             items,
         )
 
-    s7, runs7 = summarize(7)
+    s7, _runs7 = summarize(7)
     s14, _runs14 = summarize(14)
     s28, runs28 = summarize(28)
 
@@ -410,8 +419,8 @@ def analysis():
 
 
 @app.get("/dashboard", response_class=HTMLResponse)
-def dashboard():
-    response = analysis()
+def dashboard(request: Request):
+    response = analysis(request)
     data = json.loads(response.body.decode("utf-8"))
 
     if "error" in data:
@@ -523,8 +532,8 @@ def dashboard():
 
 
 @app.get("/marathon_pace")
-def marathon_pace():
-    acts = _get_activities()
+def marathon_pace(request: Request):
+    acts = _get_activities(request)
     if isinstance(acts, JSONResponse):
         return acts
 
@@ -582,8 +591,8 @@ def marathon_pace():
 
 
 @app.get("/share")
-def share():
-    resp = analysis()
+def share(request: Request):
+    resp = analysis(request)
     data = json.loads(resp.body.decode("utf-8"))
 
     html = f"""
@@ -611,8 +620,8 @@ def share():
 
 
 @app.get("/share.png")
-def share_png():
-    resp = analysis()
+def share_png(request: Request):
+    resp = analysis(request)
     data = json.loads(resp.body.decode("utf-8"))
 
     pred_est = data.get("prediction", {}).get("estimate", "--")
@@ -636,9 +645,11 @@ def share_png():
     img.save(buffer, format="PNG")
 
     return Response(buffer.getvalue(), media_type="image/png")
+
+
 @app.get("/me")
-def me():
-    user = get_current_user()
+def me(request: Request):
+    user = get_current_user(request)
 
     if not user:
         return {"logged": False}
@@ -650,13 +661,8 @@ def me():
         "lastname": user["lastname"],
         "token_expires_at": user["expires_at"],
     }
-@app.get("/healthz")
-def healthz():
-    return {
-        "status": "ok",
-        "service": "secondcoach",
-        "time": datetime.now(timezone.utc).isoformat()
-    }
+
+
 if __name__ == "__main__":
     import os
     import uvicorn
