@@ -1,38 +1,40 @@
-import sqlite3
-from pathlib import Path
+import os
 from typing import Optional
 
-DB_PATH = Path("secondcoach.db")
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
 
-def get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 
-def row_to_dict(row: Optional[sqlite3.Row]) -> Optional[dict]:
-    if row is None:
-        return None
-    return dict(row)
+def get_conn():
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL no configurado")
+    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
 
-def init_db() -> None:
-    with get_conn() as conn:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                strava_athlete_id INTEGER UNIQUE NOT NULL,
-                access_token TEXT NOT NULL,
-                refresh_token TEXT NOT NULL,
-                expires_at INTEGER NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-            """
-        )
-        conn.commit()
+def init_db():
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            id SERIAL PRIMARY KEY,
+            strava_athlete_id BIGINT UNIQUE NOT NULL,
+            access_token TEXT NOT NULL,
+            refresh_token TEXT NOT NULL,
+            expires_at BIGINT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """
+    )
+
+    conn.commit()
+    cur.close()
+    conn.close()
 
 
 def upsert_user(
@@ -40,55 +42,46 @@ def upsert_user(
     access_token: str,
     refresh_token: str,
     expires_at: int,
-) -> None:
-    with get_conn() as conn:
-        conn.execute(
-            """
-            INSERT INTO users (
-                strava_athlete_id,
-                access_token,
-                refresh_token,
-                expires_at,
-                updated_at
-            )
-            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(strava_athlete_id)
-            DO UPDATE SET
-                access_token = excluded.access_token,
-                refresh_token = excluded.refresh_token,
-                expires_at = excluded.expires_at,
-                updated_at = CURRENT_TIMESTAMP
-            """,
-            (strava_athlete_id, access_token, refresh_token, expires_at),
-        )
-        conn.commit()
+):
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        INSERT INTO users (strava_athlete_id, access_token, refresh_token, expires_at)
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT (strava_athlete_id)
+        DO UPDATE SET
+            access_token = EXCLUDED.access_token,
+            refresh_token = EXCLUDED.refresh_token,
+            expires_at = EXCLUDED.expires_at,
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (strava_athlete_id, access_token, refresh_token, expires_at),
+    )
+
+    conn.commit()
+    cur.close()
+    conn.close()
 
 
-def get_user_by_athlete_id(strava_athlete_id: int) -> Optional[dict]:
-    with get_conn() as conn:
-        row = conn.execute(
-            """
-            SELECT
-                id,
-                strava_athlete_id,
-                access_token,
-                refresh_token,
-                expires_at,
-                created_at,
-                updated_at
-            FROM users
-            WHERE strava_athlete_id = ?
-            LIMIT 1
-            """,
-            (strava_athlete_id,),
-        ).fetchone()
-        return row_to_dict(row)
+def get_user_by_athlete_id(athlete_id: int) -> Optional[dict]:
+    conn = get_conn()
+    cur = conn.cursor()
 
+    cur.execute(
+        """
+        SELECT *
+        FROM users
+        WHERE strava_athlete_id = %s
+        LIMIT 1
+        """,
+        (athlete_id,),
+    )
 
-def get_user_count() -> int:
-    with get_conn() as conn:
-        row = conn.execute("SELECT COUNT(*) AS count FROM users").fetchone()
-        return int(row["count"])
+    row = cur.fetchone()
 
+    cur.close()
+    conn.close()
 
-init_db()
+    return row
