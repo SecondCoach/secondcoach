@@ -146,7 +146,7 @@ def analysis(request: Request):
     runs = [a for a in acts if isinstance(a, dict) and a.get("type") == "Run"]
 
     km_7, avg_week, long_km = compute_training(runs)
-    quality_blocks = detect_quality_blocks(runs)
+    quality_blocks = detect_quality_blocks(runs, user["access_token"])
     goal_pace_block_km = sum(b.get("km", 0) for b in quality_blocks) if quality_blocks else 0
 
     all_predictions = predict_all_distances(
