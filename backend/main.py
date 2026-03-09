@@ -15,6 +15,52 @@ ACTIVITIES_URL = "https://www.strava.com/api/v3/athlete/activities"
 STRAVA_AUTHORIZE_URL = "https://www.strava.com/oauth/authorize"
 STRAVA_TOKEN_URL = "https://www.strava.com/oauth/token"
 
+STRAVA_ACTIVITY_DETAIL_URL = "https://www.strava.com/api/v3/activities/{activity_id}"
+
+
+def hydrate_runs_for_quality_blocks(runs: list[dict], access_token: str) -> list[dict]:
+    """
+    Para detectar bloques MP necesitamos detalle por actividad.
+    La lista de athlete/activities no siempre trae splits_metric útiles.
+    Hidratamos solo las tiradas candidatas (>= 24 km) para no disparar llamadas innecesarias.
+    """
+    headers = {"Authorization": f"Bearer {access_token}"}
+    enriched_runs: list[dict] = []
+
+    for run in runs:
+        try:
+            distance_m = float(run.get("distance") or 0)
+        except (TypeError, ValueError):
+            distance_m = 0.0
+
+        if distance_m < 24000:
+            enriched_runs.append(run)
+            continue
+
+        activity_id = run.get("id")
+        if not activity_id:
+            enriched_runs.append(run)
+            continue
+
+        try:
+            detail_resp = requests.get(
+                STRAVA_ACTIVITY_DETAIL_URL.format(activity_id=activity_id),
+                headers=headers,
+                params={"include_all_efforts": "false"},
+                timeout=30,
+            )
+            detail_resp.raise_for_status()
+            detail = detail_resp.json()
+            if isinstance(detail, dict):
+                enriched_runs.append(detail)
+            else:
+                enriched_runs.append(run)
+        except Exception:
+            enriched_runs.append(run)
+
+    return enriched_runs
+
+
 app = FastAPI()
 
 app.add_middleware(
@@ -143,10 +189,11 @@ def analysis(request: Request):
             acts = payload
 
     runs = [a for a in acts if isinstance(a, dict) and a.get("type") == "Run"]
+    detailed_runs = hydrate_runs_for_quality_blocks(runs, user["access_token"])
 
     km_7, avg_week, long_km = compute_training(runs)
     quality_blocks = detect_quality_blocks(
-        runs,
+        detailed_runs,
         goal_time=request.session.get("goal_time", "3:30"),
         race_type=request.session.get("race_type", "marathon"),
     )

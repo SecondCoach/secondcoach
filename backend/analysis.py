@@ -16,7 +16,6 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
 def _parse_datetime(value: str | None) -> datetime | None:
     if not value:
         return None
-
     try:
         if value.endswith("Z"):
             return datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -33,19 +32,7 @@ def _meters_to_km(meters: Any) -> float:
     return round(_safe_float(meters) / 1000.0, 1)
 
 
-def _seconds_to_mmss(seconds: float) -> str:
-    total = int(round(seconds))
-    minutes = total // 60
-    secs = total % 60
-    return f"{minutes}:{secs:02d}"
-
-
 def _pace_seconds_per_km_from_goal_time(goal_time: str, distance_km: float = 42.195) -> float:
-    """
-    goal_time examples:
-    - '3:30'
-    - '3:30:00'
-    """
     if not goal_time:
         goal_time = "3:30"
 
@@ -64,21 +51,11 @@ def _pace_seconds_per_km_from_goal_time(goal_time: str, distance_km: float = 42.
 
 
 def _goal_pace_window_seconds(goal_time: str = "3:30") -> tuple[float, float]:
-    """
-    Mantiene una ventana muy parecida a la actual para no romper el comportamiento:
-    para 3:30 maratón ≈ 4:58/km, y usamos ±9 segundos.
-    """
     target = _pace_seconds_per_km_from_goal_time(goal_time, 42.195)
     return target - 9, target + 9
 
 
 def compute_training(runs: list[dict[str, Any]]) -> tuple[float, float, float]:
-    """
-    Devuelve:
-    - km últimos 7 días
-    - media semanal estimada en 28 días
-    - tirada larga (km)
-    """
     now = _now_utc()
     seven_days_ago = now - timedelta(days=7)
     twenty_eight_days_ago = now - timedelta(days=28)
@@ -109,15 +86,41 @@ def compute_training(runs: list[dict[str, Any]]) -> tuple[float, float, float]:
             km_last_28_days += run_km
 
     weekly_average_km = km_last_28_days / 4.0
-
     return round(km_last_7_days, 1), round(weekly_average_km, 1), round(long_run_km, 1)
 
 
-def _extract_splits(run: dict[str, Any]) -> list[dict[str, Any]]:
+def _extract_units(run: dict[str, Any]) -> list[dict[str, Any]]:
+    """
+    Prioridad:
+    1) splits_metric (ideal para km exactos)
+    2) laps (fallback útil en detalle de actividad)
+    """
     splits = run.get("splits_metric")
-    if isinstance(splits, list):
+    if isinstance(splits, list) and splits:
         return splits
+
+    laps = run.get("laps")
+    if isinstance(laps, list) and laps:
+        return laps
+
     return []
+
+
+def _unit_distance_km(unit: dict[str, Any]) -> float:
+    km = _safe_float(unit.get("distance")) / 1000.0
+    if km <= 0:
+        km = 1.0
+    return km
+
+
+def _unit_pace_sec_per_km(unit: dict[str, Any]) -> float:
+    moving_time_sec = _safe_float(unit.get("moving_time"))
+    distance_km = _unit_distance_km(unit)
+
+    if moving_time_sec <= 0 or distance_km <= 0:
+        return 9999.0
+
+    return moving_time_sec / distance_km
 
 
 def _build_quality_block(
@@ -125,7 +128,8 @@ def _build_quality_block(
     start_index: int,
     end_index: int,
     cumulative_distances_km: list[float],
-    split_count: int,
+    unit_count: int,
+    source_kind: str,
 ) -> dict[str, Any]:
     total_run_km = _meters_to_km(run.get("distance"))
     start_km = round(cumulative_distances_km[start_index], 1)
@@ -140,7 +144,8 @@ def _build_quality_block(
         "total_run_km": total_run_km,
         "start_km": start_km,
         "end_km": end_km,
-        "split_count": split_count,
+        "unit_count": unit_count,
+        "source_kind": source_kind,
     }
 
 
@@ -149,17 +154,6 @@ def detect_quality_blocks(
     goal_time: str = "3:30",
     race_type: str = "marathon",
 ) -> list[dict[str, Any]]:
-    """
-    Reglas MVP conservadoras:
-    - solo tipo Run
-    - solo tiradas >= 24 km
-    - solo segunda mitad de la tirada
-    - split válido si pace está en ventana MP
-    - bloque válido si acumula >= 4.0 km continuos
-
-    Devuelve bloques enriquecidos con:
-    activity_id, activity_name, activity_date, total_run_km, start_km, end_km
-    """
     if race_type != "marathon":
         return []
 
@@ -174,54 +168,43 @@ def detect_quality_blocks(
         if total_run_km < 24.0:
             continue
 
-        splits = _extract_splits(run)
-        if not splits:
+        source_kind = "splits_metric" if isinstance(run.get("splits_metric"), list) and run.get("splits_metric") else "laps"
+        units = _extract_units(run)
+        if not units:
             continue
 
         cumulative_distances_km: list[float] = [0.0]
-        for split in splits:
-            last = cumulative_distances_km[-1]
-            split_km = _safe_float(split.get("distance")) / 1000.0
-            if split_km <= 0:
-                split_km = 1.0
-            cumulative_distances_km.append(last + split_km)
+        for unit in units:
+            cumulative_distances_km.append(cumulative_distances_km[-1] + _unit_distance_km(unit))
 
         second_half_threshold = total_run_km / 2.0
 
         current_start_idx: int | None = None
         current_end_idx: int | None = None
         current_distance_km = 0.0
-        current_split_count = 0
+        current_unit_count = 0
 
-        for idx, split in enumerate(splits):
-            split_distance_km = _safe_float(split.get("distance")) / 1000.0
-            if split_distance_km <= 0:
-                split_distance_km = 1.0
+        for idx, unit in enumerate(units):
+            unit_distance_km = _unit_distance_km(unit)
+            unit_start_km = cumulative_distances_km[idx]
+            unit_end_km = cumulative_distances_km[idx + 1]
 
-            split_start_km = cumulative_distances_km[idx]
-            split_end_km = cumulative_distances_km[idx + 1]
-
-            if split_end_km <= second_half_threshold:
+            if unit_end_km <= second_half_threshold:
                 continue
 
-            moving_time_sec = _safe_float(split.get("moving_time"))
-            if moving_time_sec <= 0:
-                pace_sec_per_km = 9999.0
-            else:
-                pace_sec_per_km = moving_time_sec / split_distance_km
-
+            pace_sec_per_km = _unit_pace_sec_per_km(unit)
             is_mp = min_pace_sec <= pace_sec_per_km <= max_pace_sec
 
             if is_mp:
                 if current_start_idx is None:
                     current_start_idx = idx
                     current_end_idx = idx + 1
-                    current_distance_km = split_distance_km
-                    current_split_count = 1
+                    current_distance_km = unit_distance_km
+                    current_unit_count = 1
                 else:
                     current_end_idx = idx + 1
-                    current_distance_km += split_distance_km
-                    current_split_count += 1
+                    current_distance_km += unit_distance_km
+                    current_unit_count += 1
             else:
                 if (
                     current_start_idx is not None
@@ -234,14 +217,15 @@ def detect_quality_blocks(
                             start_index=current_start_idx,
                             end_index=current_end_idx,
                             cumulative_distances_km=cumulative_distances_km,
-                            split_count=current_split_count,
+                            unit_count=current_unit_count,
+                            source_kind=source_kind,
                         )
                     )
 
                 current_start_idx = None
                 current_end_idx = None
                 current_distance_km = 0.0
-                current_split_count = 0
+                current_unit_count = 0
 
         if (
             current_start_idx is not None
@@ -254,7 +238,8 @@ def detect_quality_blocks(
                     start_index=current_start_idx,
                     end_index=current_end_idx,
                     cumulative_distances_km=cumulative_distances_km,
-                    split_count=current_split_count,
+                    unit_count=current_unit_count,
+                    source_kind=source_kind,
                 )
             )
 
