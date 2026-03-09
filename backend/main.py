@@ -53,42 +53,6 @@ def hydrate_runs_for_quality_blocks(runs: list[dict], access_token: str) -> list
     return enriched_runs
 
 
-def build_quality_debug(runs: list[dict]) -> list[dict]:
-    debug = []
-
-    for run in runs:
-        if run.get("type") != "Run":
-            continue
-
-        try:
-            distance_km = float(run.get("distance") or 0) / 1000.0
-        except (TypeError, ValueError):
-            distance_km = 0.0
-
-        if distance_km < 24:
-            continue
-
-        splits = run.get("splits_metric")
-        laps = run.get("laps")
-
-        debug.append(
-            {
-                "activity_id": run.get("id"),
-                "activity_name": run.get("name"),
-                "activity_date": (run.get("start_date_local") or run.get("start_date") or "")[:10],
-                "total_run_km": round(distance_km, 1),
-                "has_splits_metric": isinstance(splits, list) and len(splits) > 0,
-                "splits_metric_count": len(splits) if isinstance(splits, list) else 0,
-                "has_laps": isinstance(laps, list) and len(laps) > 0,
-                "laps_count": len(laps) if isinstance(laps, list) else 0,
-            }
-        )
-
-    debug.sort(key=lambda x: (x.get("activity_date", ""), x.get("total_run_km", 0)), reverse=True)
-    return debug[:10]
-
-
-
 app = FastAPI()
 
 app.add_middleware(
@@ -292,7 +256,6 @@ def analysis(request: Request):
             "next_focus": "Mantén una tirada larga sólida y bloques de ritmo objetivo.",
         },
         "all_predictions": display_predictions,
-        "quality_debug": build_quality_debug(detailed_runs),
     }
 
     return result
