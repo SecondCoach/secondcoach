@@ -145,6 +145,9 @@ def analysis(request: Request):
     )
 
     goal_time = "3:30"
+
+    # Temporalmente la predicción principal de maratón no sale del motor multi-distancia,
+    # para evitar una regresión de producto en el core de maratón.
     marathon_prediction = None
     predicted_time = marathon_prediction or "3:25"
 
@@ -155,6 +158,9 @@ def analysis(request: Request):
         minutes_vs_goal = round((pred_sec - goal_sec) / 60)
     else:
         minutes_vs_goal = 0
+
+    display_predictions = dict(all_predictions)
+    display_predictions["marathon"] = predicted_time
 
     result = {
         "race": {
@@ -187,7 +193,7 @@ def analysis(request: Request):
             "limiter": "Te falta algo de volumen semanal.",
             "next_focus": "Mantén una tirada larga sólida y bloques de ritmo objetivo.",
         },
-        "all_predictions": all_predictions,
+        "all_predictions": display_predictions,
     }
 
     return result
