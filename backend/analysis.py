@@ -36,7 +36,13 @@ def compute_training(runs):
 
 def detect_quality_blocks(runs, access_token):
     """
-    Detecta bloques MP usando splits_metric reales por km.
+    Detecta bloques específicos de maratón usando splits_metric.
+
+    Criterios MVP:
+    - solo runs candidatas de 24 km o más
+    - ventana MP entrenamiento: 4:49/km → 5:04/km
+    - bloque mínimo: 4 km continuos
+    - solo cuenta bloques en la segunda mitad de la tirada
     """
 
     blocks = []
@@ -45,21 +51,19 @@ def detect_quality_blocks(runs, access_token):
     mp_high = 304  # 5:04/km
 
     for r in runs:
-
         distance_m = r.get("distance", 0) or 0
         activity_id = r.get("id")
 
-        if distance_m < 16000:
+        if distance_m < 24000:
             continue
 
         if not activity_id:
             continue
 
-        url = f"https://www.strava.com/api/v3/activities/{activity_id}"
+        total_km = distance_m / 1000
 
-        headers = {
-            "Authorization": f"Bearer {access_token}"
-        }
+        url = f"https://www.strava.com/api/v3/activities/{activity_id}"
+        headers = {"Authorization": f"Bearer {access_token}"}
 
         try:
             res = requests.get(url, headers=headers, timeout=20)
@@ -67,32 +71,35 @@ def detect_quality_blocks(runs, access_token):
         except Exception:
             continue
 
-        splits = detail.get("splits_metric")
-
+        splits = detail.get("splits_metric") or []
         if not splits:
             continue
 
         current_block = 0.0
+        km_covered = 0.0
 
         for s in splits:
-
             distance = s.get("distance", 0) or 0
             moving_time = s.get("moving_time", 0) or 0
 
-            if distance == 0:
+            if distance <= 0 or moving_time <= 0:
                 continue
 
             km = distance / 1000
             pace = moving_time / km
+            block_start_km = km_covered
+            km_covered += km
 
-            if mp_low <= pace <= mp_high:
+            in_second_half = block_start_km >= (total_km / 2)
+
+            if in_second_half and mp_low <= pace <= mp_high:
                 current_block += km
             else:
-                if current_block >= 2:
+                if current_block >= 4.0:
                     blocks.append({"km": round(current_block, 2)})
                 current_block = 0.0
 
-        if current_block >= 2:
+        if current_block >= 4.0:
             blocks.append({"km": round(current_block, 2)})
 
     return blocks
