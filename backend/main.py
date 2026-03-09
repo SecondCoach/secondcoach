@@ -185,3 +185,123 @@ def analysis(request: Request):
 @app.get("/api/bootstrap")
 def bootstrap(request: Request):
     return analysis(request)
+
+from fastapi.responses import HTMLResponse
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+def dashboard(request: Request):
+
+    data = analysis(request)
+
+    preds = data.get("all_predictions", {})
+
+    html = f"""
+    <html>
+    <head>
+        <title>SecondCoach</title>
+        <style>
+            body {{
+                font-family: Arial;
+                background: #0f172a;
+                color: white;
+                text-align: center;
+                padding: 40px;
+            }}
+            h1 {{
+                font-size: 42px;
+            }}
+            .card {{
+                background: #1e293b;
+                border-radius: 12px;
+                padding: 20px;
+                margin: 20px auto;
+                width: 320px;
+            }}
+            .metric {{
+                font-size: 28px;
+                margin: 10px 0;
+            }}
+        </style>
+    </head>
+
+    <body>
+
+        <h1>SecondCoach</h1>
+
+        <div class="card">
+            <h2>Predicciones</h2>
+            <div class="metric">5K: {preds.get("5k")}</div>
+            <div class="metric">10K: {preds.get("10k")}</div>
+            <div class="metric">Media: {preds.get("half")}</div>
+            <div class="metric">Maratón: {preds.get("marathon")}</div>
+        </div>
+
+        <div class="card">
+            <h2>Readiness</h2>
+            <div class="metric">{data["status"]["readiness_label"]}</div>
+        </div>
+
+    </body>
+    </html>
+    """
+
+    return HTMLResponse(html)
+
+from fastapi.responses import HTMLResponse
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+def dashboard(request: Request):
+
+    data = analysis(request)
+    preds = data.get("all_predictions", {})
+
+    html = f"""
+    <html>
+    <head>
+        <title>SecondCoach</title>
+        <style>
+            body {{
+                font-family: Arial;
+                background: #0f172a;
+                color: white;
+                text-align: center;
+                padding: 40px;
+            }}
+            .card {{
+                background: #1e293b;
+                border-radius: 12px;
+                padding: 20px;
+                margin: 20px auto;
+                width: 320px;
+            }}
+            .metric {{
+                font-size: 28px;
+                margin: 10px 0;
+            }}
+        </style>
+    </head>
+
+    <body>
+
+        <h1>SecondCoach</h1>
+
+        <div class="card">
+            <h2>Predicciones</h2>
+            <div class="metric">5K: {preds.get("5k")}</div>
+            <div class="metric">10K: {preds.get("10k")}</div>
+            <div class="metric">Media: {preds.get("half")}</div>
+            <div class="metric">Maratón: {preds.get("marathon")}</div>
+        </div>
+
+        <div class="card">
+            <h2>Estado</h2>
+            <div class="metric">{data["status"]["readiness_label"]}</div>
+        </div>
+
+    </body>
+    </html>
+    """
+
+    return HTMLResponse(html)
