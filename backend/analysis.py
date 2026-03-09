@@ -55,7 +55,7 @@ def _pace_seconds_per_km_from_goal_time(goal_time: str, distance_km: float = 42.
 
 def _goal_pace_window_seconds(goal_time: str = "3:30") -> tuple[float, float]:
     target = _pace_seconds_per_km_from_goal_time(goal_time, 42.195)
-    return target - 9, target + 9
+    return target - 20, target + 20
 
 
 def _activity_datetime(run: dict[str, Any]) -> datetime | None:
