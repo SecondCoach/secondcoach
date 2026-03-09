@@ -35,31 +35,46 @@ def compute_training(runs):
 
 def detect_quality_blocks(runs):
     """
-    MVP:
-    detecta laps cercanas a ritmo maratón usando laps de Strava.
-    Ventana actual: 4:45/km a 5:05/km (~objetivo 3h30).
+    MVP robusto sin usar laps.
+
+    Detecta bloques de calidad usando el ritmo medio
+    de cada actividad.
+
+    Para objetivo maratón 3:30 (~4:59/km):
+
+    MP window entrenamiento:
+    4:49/km → 5:04/km
     """
+
     blocks = []
 
+    # segundos/km
+    mp_low = 289   # 4:49/km
+    mp_high = 304  # 5:04/km
+
     for r in runs:
-        laps = r.get("laps") or []
 
-        for lap in laps:
-            distance_m = lap.get("distance", 0) or 0
-            moving_time = lap.get("moving_time", 0) or 0
+        distance_m = r.get("distance", 0) or 0
+        moving_time = r.get("moving_time", 0) or 0
 
-            km = distance_m / 1000
-            if km < 0.8:
-                continue
+        if distance_m <= 0 or moving_time <= 0:
+            continue
 
-            pace = moving_time / km  # segundos por km
+        km = distance_m / 1000
 
-            if 285 <= pace <= 305:
-                blocks.append(
-                    {
-                        "km": round(km, 2),
-                        "pace": round(pace, 1),
-                    }
-                )
+        # ignorar rodajes muy cortos
+        if km < 5:
+            continue
+
+        pace = moving_time / km  # seg/km
+
+        if mp_low <= pace <= mp_high:
+
+            blocks.append(
+                {
+                    "km": round(km, 2),
+                    "pace": round(pace, 1),
+                }
+            )
 
     return blocks
