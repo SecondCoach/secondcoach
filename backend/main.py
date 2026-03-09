@@ -39,8 +39,9 @@ def time_to_seconds(value: str | None) -> int | None:
         return h * 3600 + m * 60 + s
 
     if len(parts) == 2:
-        m, s = parts
-        return m * 60 + s
+        # En SecondCoach los tiempos de predicción como "3:25" significan H:MM
+        h, m = parts
+        return h * 3600 + m * 60
 
     return None
 
@@ -156,11 +157,15 @@ def analysis(request: Request):
 
     goal_time = "3:30"
 
+    # Temporalmente mantenemos una predicción principal fija mientras
+    # recuperamos una lógica específica de maratón más fiable.
     predicted_time = "3:25"
 
     pred_sec = time_to_seconds(predicted_time)
     goal_sec = time_to_seconds(goal_time)
 
+    # Incertidumbre MVP:
+    # menos volumen y menos bloques específicos => rango más ancho
     spread_minutes = 6
 
     if avg_week < 45:
@@ -171,15 +176,13 @@ def analysis(request: Request):
         spread_minutes += 1
 
     spread_sec = spread_minutes * 60
-
     range_low = seconds_to_time(pred_sec - spread_sec)
     range_high = seconds_to_time(pred_sec + spread_sec)
 
-    if range_low == predicted_time and range_high == predicted_time:
-        range_low = seconds_to_time(pred_sec - 360)
-        range_high = seconds_to_time(pred_sec + 360)
-
-    minutes_vs_goal = round((pred_sec - goal_sec) / 60)
+    if pred_sec is not None and goal_sec is not None:
+        minutes_vs_goal = round((pred_sec - goal_sec) / 60)
+    else:
+        minutes_vs_goal = 0
 
     display_predictions = dict(all_predictions)
     display_predictions["marathon"] = predicted_time
