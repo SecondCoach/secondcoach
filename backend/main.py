@@ -726,7 +726,5 @@ def health():
 
 @app.get("/debug/users")
 def debug_users():
-    from backend.db import get_conn
-    conn = get_conn()
-    rows = conn.execute("SELECT strava_athlete_id FROM users").fetchall()
-    return {"users": [r["strava_athlete_id"] for r in rows]}
+    from backend.db import list_user_athlete_ids
+    return {"users": list_user_athlete_ids()}
