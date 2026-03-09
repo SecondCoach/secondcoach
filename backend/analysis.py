@@ -1,9 +1,8 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 
 def compute_training(runs):
-
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     week_ago = now - timedelta(days=7)
     month_ago = now - timedelta(days=28)
 
@@ -12,9 +11,7 @@ def compute_training(runs):
     long_run = 0
 
     for r in runs:
-
         dist_km = r["distance"] / 1000
-
         date = datetime.fromisoformat(r["start_date"].replace("Z", "+00:00"))
 
         if date > week_ago:
@@ -32,21 +29,16 @@ def compute_training(runs):
 
 
 def detect_quality_blocks(runs):
-
     """
     Versión simple:
     detecta bloques cercanos a ritmo maratón
     usando laps de Strava.
     """
-
     blocks = []
 
     for r in runs:
-
         if r.get("laps"):
-
             for lap in r["laps"]:
-
                 km = lap["distance"] / 1000
 
                 if km < 0.8:
@@ -55,12 +47,10 @@ def detect_quality_blocks(runs):
                 pace = lap["moving_time"] / km
 
                 # ritmo 4:45–5:05 (maratón ~3h30)
-
                 if 285 <= pace <= 305:
-
                     blocks.append({
                         "km": round(km, 2),
-                        "pace": pace
+                        "pace": pace,
                     })
 
     return blocks
