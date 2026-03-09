@@ -36,12 +36,11 @@ def compute_training(runs):
 
 def detect_quality_blocks(runs, access_token):
     """
-    Detecta bloques MP usando splits_metric por km.
+    Detecta bloques MP usando splits_metric reales por km.
     """
 
     blocks = []
 
-    # ventana MP entrenamiento (3:30 objetivo)
     mp_low = 289   # 4:49/km
     mp_high = 304  # 5:04/km
 
@@ -91,7 +90,7 @@ def detect_quality_blocks(runs, access_token):
             else:
                 if current_block >= 2:
                     blocks.append({"km": round(current_block, 2)})
-                current_block = 0
+                current_block = 0.0
 
         if current_block >= 2:
             blocks.append({"km": round(current_block, 2)})
