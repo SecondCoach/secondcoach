@@ -277,11 +277,7 @@ def analysis(request: Request):
             "goal_pace_block_count": len(quality_blocks),
             "quality_blocks": quality_blocks,
         },
-        "coach": {
-            "positive": "Acumulas km recientes cerca del ritmo objetivo.",
-            "limiter": "Te falta algo de volumen semanal.",
-            "next_focus": "Mantén una tirada larga sólida y bloques de ritmo objetivo.",
-        },
+        "coach": coach,
         "all_predictions": display_predictions,
     }
 
