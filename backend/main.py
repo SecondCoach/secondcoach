@@ -181,3 +181,7 @@ def analysis(request: Request):
     }
 
     return result
+
+@app.get("/api/bootstrap")
+def bootstrap(request: Request):
+    return analysis(request)
