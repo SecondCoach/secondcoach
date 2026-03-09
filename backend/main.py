@@ -15,9 +15,11 @@ from backend.strava_auth import refresh_access_token_if_needed
 from backend.strava_segments import detect_goal_pace_lap_blocks, total_block_km
 
 from backend.share_public import router as share_public_router
+from backend.public_page import router as public_router
 
 app = FastAPI()
 app.include_router(share_public_router)
+app.include_router(public_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
