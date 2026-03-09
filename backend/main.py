@@ -127,6 +127,9 @@ def analysis(request: Request):
         goal_blocks_km=goal_pace_block_km,
     )
 
+    marathon_prediction = all_predictions.get("marathon")
+    predicted_time = marathon_prediction or "3:25"
+
     result = {
         "race": {
             "type": "marathon",
@@ -140,10 +143,10 @@ def analysis(request: Request):
             "specificity": "high",
         },
         "prediction": {
-            "predicted_time": "3:25",
-            "range_low": "3:22",
-            "range_high": "3:29",
-            "minutes_vs_goal": -5,
+            "predicted_time": predicted_time,
+            "range_low": predicted_time,
+            "range_high": predicted_time,
+            "minutes_vs_goal": 0,
         },
         "training": {
             "km_last_7_days": km_7,
