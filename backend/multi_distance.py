@@ -2,7 +2,7 @@ from math import pow
 
 
 def riegel(time_seconds, dist1_km, dist2_km):
-    if not dist1_km:
+    if not dist1_km or time_seconds is None:
         return None
     return time_seconds * pow(dist2_km / dist1_km, 1.06)
 
@@ -28,19 +28,32 @@ def _safe_float(value):
         return 0.0
 
 
+def _clamp(value, low, high):
+    return max(low, min(high, value))
+
+
 def predict_all_distances(avg_week_km, long_run_km, goal_blocks_km):
     """
-    Firma compatible con backend/main.py:
-    predict_all_distances(avg_week_km=..., long_run_km=..., goal_blocks_km=...)
+    MVP calibrado para que la predicción de maratón sea plausible
+    con las métricas que ya calcula SecondCoach.
+
+    Entradas:
+    - avg_week_km
+    - long_run_km
+    - goal_blocks_km
+
+    Salidas:
+    - 5k
+    - 10k
+    - half
+    - marathon
     """
 
     avg_week_km = _safe_float(avg_week_km)
     long_run_km = _safe_float(long_run_km)
     goal_blocks_km = _safe_float(goal_blocks_km)
 
-    score = avg_week_km * 0.6 + long_run_km * 0.3 + goal_blocks_km * 1.5
-
-    if score <= 0:
+    if avg_week_km <= 0 and long_run_km <= 0 and goal_blocks_km <= 0:
         return {
             "5k": None,
             "10k": None,
@@ -48,18 +61,27 @@ def predict_all_distances(avg_week_km, long_run_km, goal_blocks_km):
             "marathon": None,
         }
 
-    # base simple sobre 10K
-    base_10k_seconds = max(1800, 4200 - score * 20)
+    # Heurística simple, pero calibrada:
+    # más volumen semanal, tirada larga y km a ritmo objetivo => mejor maratón
+    marathon_seconds = (
+        15480
+        - avg_week_km * 20
+        - long_run_km * 30
+        - goal_blocks_km * 8
+    )
 
-    pred_5k = riegel(base_10k_seconds, 10, 5)
-    pred_half = riegel(base_10k_seconds, 10, 21.097)
-    pred_marathon = riegel(base_10k_seconds, 10, 42.195)
+    # límites razonables para evitar barbaridades
+    marathon_seconds = _clamp(marathon_seconds, 10800, 18000)  # 3:00:00 a 5:00:00
+
+    pred_half = riegel(marathon_seconds, 42.195, 21.097)
+    pred_10k = riegel(marathon_seconds, 42.195, 10)
+    pred_5k = riegel(marathon_seconds, 42.195, 5)
 
     return {
         "5k": seconds_to_time_str(pred_5k),
-        "10k": seconds_to_time_str(base_10k_seconds),
+        "10k": seconds_to_time_str(pred_10k),
         "half": seconds_to_time_str(pred_half),
-        "marathon": seconds_to_time_str(pred_marathon),
+        "marathon": seconds_to_time_str(marathon_seconds),
     }
 
 
