@@ -3,4 +3,5 @@ uvicorn
 requests
 pillow
 pydantic-settings
-itsdangerouspsycopg2-binary
+itsdangerous
+psycopg2-binary
