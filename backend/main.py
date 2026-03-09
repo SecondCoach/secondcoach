@@ -1,4 +1,31 @@
-from fastapi import FastAPI, Request
+recent_block = quality_blocks[0] if quality_blocks else None
+
+if recent_block:
+    block_km = recent_block.get("km", 0)
+    block_date = recent_block.get("activity_date")
+
+    positive = (
+        f"Has realizado un bloque reciente de {block_km} km a ritmo maratón "
+        f"en tu tirada del {block_date}."
+    )
+else:
+    positive = "Tu volumen reciente es consistente, pero aún no aparecen bloques claros a ritmo maratón."
+
+if avg_week < 55:
+    limiter = "Tu volumen semanal medio aún es algo justo para consolidar un sub-3:30."
+else:
+    limiter = "El volumen semanal es adecuado, el limitante pasa a ser la especificidad."
+
+if goal_pace_block_km >= 12:
+    next_focus = "Mantén una tirada larga sólida y añade bloques de 8-10 km a ritmo maratón."
+else:
+    next_focus = "Introduce progresivamente bloques más largos a ritmo maratón dentro de las tiradas largas."
+
+"coach": {
+    "positive": positive,
+    "limiter": limiter,
+    "next_focus": next_focus,
+},from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse
 from starlette.middleware.sessions import SessionMiddleware
