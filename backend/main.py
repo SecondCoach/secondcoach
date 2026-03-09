@@ -45,6 +45,16 @@ def time_to_seconds(value: str | None) -> int | None:
     return None
 
 
+def seconds_to_time(sec: int) -> str:
+    if sec < 0:
+        sec = 0
+
+    h = sec // 3600
+    m = (sec % 3600) // 60
+    s = sec % 60
+    return f"{h}:{m:02d}:{s:02d}"
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -146,18 +156,30 @@ def analysis(request: Request):
 
     goal_time = "3:30"
 
-    # Temporalmente la predicción principal de maratón no sale del motor multi-distancia,
-    # para evitar una regresión de producto en el core de maratón.
-    marathon_prediction = None
-    predicted_time = marathon_prediction or "3:25"
+    predicted_time = "3:25"
 
     pred_sec = time_to_seconds(predicted_time)
     goal_sec = time_to_seconds(goal_time)
 
-    if pred_sec is not None and goal_sec is not None:
-        minutes_vs_goal = round((pred_sec - goal_sec) / 60)
-    else:
-        minutes_vs_goal = 0
+    spread_minutes = 6
+
+    if avg_week < 45:
+        spread_minutes += 2
+    if goal_pace_block_km <= 0:
+        spread_minutes += 2
+    if long_km < 28:
+        spread_minutes += 1
+
+    spread_sec = spread_minutes * 60
+
+    range_low = seconds_to_time(pred_sec - spread_sec)
+    range_high = seconds_to_time(pred_sec + spread_sec)
+
+    if range_low == predicted_time and range_high == predicted_time:
+        range_low = seconds_to_time(pred_sec - 360)
+        range_high = seconds_to_time(pred_sec + 360)
+
+    minutes_vs_goal = round((pred_sec - goal_sec) / 60)
 
     display_predictions = dict(all_predictions)
     display_predictions["marathon"] = predicted_time
@@ -176,8 +198,8 @@ def analysis(request: Request):
         },
         "prediction": {
             "predicted_time": predicted_time,
-            "range_low": predicted_time,
-            "range_high": predicted_time,
+            "range_low": range_low,
+            "range_high": range_high,
             "minutes_vs_goal": minutes_vs_goal,
         },
         "training": {
@@ -255,10 +277,6 @@ def dashboard(request: Request):
             }}
             .green {{
                 color: #22c55e;
-            }}
-            p {{
-                font-size: 18px;
-                line-height: 1.5;
             }}
         </style>
     </head>
