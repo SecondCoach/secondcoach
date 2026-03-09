@@ -28,6 +28,23 @@ app.add_middleware(
 app.add_middleware(SessionMiddleware, secret_key=settings.APP_SESSION_SECRET)
 
 
+def time_to_seconds(value: str | None) -> int | None:
+    if not value:
+        return None
+
+    parts = [int(p) for p in value.split(":")]
+
+    if len(parts) == 3:
+        h, m, s = parts
+        return h * 3600 + m * 60 + s
+
+    if len(parts) == 2:
+        m, s = parts
+        return m * 60 + s
+
+    return None
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -85,7 +102,7 @@ def analysis(request: Request):
     athlete_id = request.session.get("athlete_id")
 
     if not athlete_id:
-        athlete_id = 1388857
+        return RedirectResponse("/login")
 
     user = get_user_by_athlete_id(athlete_id)
 
@@ -127,15 +144,24 @@ def analysis(request: Request):
         goal_blocks_km=goal_pace_block_km,
     )
 
+    goal_time = "3:30"
     marathon_prediction = all_predictions.get("marathon")
     predicted_time = marathon_prediction or "3:25"
+
+    pred_sec = time_to_seconds(predicted_time)
+    goal_sec = time_to_seconds(goal_time)
+
+    if pred_sec is not None and goal_sec is not None:
+        minutes_vs_goal = round((pred_sec - goal_sec) / 60)
+    else:
+        minutes_vs_goal = 0
 
     result = {
         "race": {
             "type": "marathon",
             "name": "Maratón de Zaragoza",
             "date": "2026-04-12",
-            "goal_time": "3:30",
+            "goal_time": goal_time,
         },
         "status": {
             "readiness": "on_track",
@@ -146,7 +172,7 @@ def analysis(request: Request):
             "predicted_time": predicted_time,
             "range_low": predicted_time,
             "range_high": predicted_time,
-            "minutes_vs_goal": 0,
+            "minutes_vs_goal": minutes_vs_goal,
         },
         "training": {
             "km_last_7_days": km_7,
@@ -175,6 +201,9 @@ def bootstrap(request: Request):
 @app.get("/dashboard", response_class=HTMLResponse)
 def dashboard(request: Request):
     data = analysis(request)
+
+    if isinstance(data, RedirectResponse):
+        return data
 
     race = data["race"]
     status = data["status"]
