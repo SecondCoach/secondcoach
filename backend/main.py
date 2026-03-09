@@ -39,7 +39,6 @@ def time_to_seconds(value: str | None) -> int | None:
         return h * 3600 + m * 60 + s
 
     if len(parts) == 2:
-        # En SecondCoach los tiempos de predicción como "3:25" significan H:MM
         h, m = parts
         return h * 3600 + m * 60
 
@@ -156,18 +155,12 @@ def analysis(request: Request):
     )
 
     goal_time = "3:30"
-
-    # Temporalmente mantenemos una predicción principal fija mientras
-    # recuperamos una lógica específica de maratón más fiable.
     predicted_time = "3:25"
 
     pred_sec = time_to_seconds(predicted_time)
     goal_sec = time_to_seconds(goal_time)
 
-    # Incertidumbre MVP:
-    # menos volumen y menos bloques específicos => rango más ancho
     spread_minutes = 6
-
     if avg_week < 45:
         spread_minutes += 2
     if goal_pace_block_km <= 0:
@@ -212,6 +205,7 @@ def analysis(request: Request):
             "quality_blocks_count": len(quality_blocks),
             "goal_pace_block_km": goal_pace_block_km,
             "goal_pace_block_count": len(quality_blocks),
+            "quality_blocks": quality_blocks,
         },
         "coach": {
             "positive": "Acumulas km recientes cerca del ritmo objetivo.",
@@ -280,6 +274,10 @@ def dashboard(request: Request):
             }}
             .green {{
                 color: #22c55e;
+            }}
+            p {{
+                font-size: 18px;
+                line-height: 1.5;
             }}
         </style>
     </head>
