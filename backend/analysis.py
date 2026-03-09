@@ -4,6 +4,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 
+QUALITY_BLOCK_LOOKBACK_DAYS = 120
+
+
 def _safe_float(value: Any, default: float = 0.0) -> float:
     try:
         if value is None:
@@ -55,6 +58,15 @@ def _goal_pace_window_seconds(goal_time: str = "3:30") -> tuple[float, float]:
     return target - 9, target + 9
 
 
+def _activity_datetime(run: dict[str, Any]) -> datetime | None:
+    dt = _parse_datetime(run.get("start_date")) or _parse_datetime(run.get("start_date_local"))
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 def compute_training(runs: list[dict[str, Any]]) -> tuple[float, float, float]:
     now = _now_utc()
     seven_days_ago = now - timedelta(days=7)
@@ -72,12 +84,9 @@ def compute_training(runs: list[dict[str, Any]]) -> tuple[float, float, float]:
         run_km = distance_m / 1000.0
         long_run_km = max(long_run_km, run_km)
 
-        dt = _parse_datetime(run.get("start_date")) or _parse_datetime(run.get("start_date_local"))
+        dt = _activity_datetime(run)
         if dt is None:
             continue
-
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
 
         if dt >= seven_days_ago:
             km_last_7_days += run_km
@@ -90,11 +99,6 @@ def compute_training(runs: list[dict[str, Any]]) -> tuple[float, float, float]:
 
 
 def _extract_units(run: dict[str, Any]) -> list[dict[str, Any]]:
-    """
-    Prioridad:
-    1) splits_metric (ideal para km exactos)
-    2) laps (fallback útil en detalle de actividad)
-    """
     splits = run.get("splits_metric")
     if isinstance(splits, list) and splits:
         return splits
@@ -157,6 +161,8 @@ def detect_quality_blocks(
     if race_type != "marathon":
         return []
 
+    now = _now_utc()
+    lookback_start = now - timedelta(days=QUALITY_BLOCK_LOOKBACK_DAYS)
     min_pace_sec, max_pace_sec = _goal_pace_window_seconds(goal_time)
     blocks: list[dict[str, Any]] = []
 
@@ -164,11 +170,17 @@ def detect_quality_blocks(
         if run.get("type") != "Run":
             continue
 
+        activity_dt = _activity_datetime(run)
+        if activity_dt is None or activity_dt < lookback_start:
+            continue
+
         total_run_km = _meters_to_km(run.get("distance"))
         if total_run_km < 24.0:
             continue
 
-        source_kind = "splits_metric" if isinstance(run.get("splits_metric"), list) and run.get("splits_metric") else "laps"
+        has_splits = isinstance(run.get("splits_metric"), list) and bool(run.get("splits_metric"))
+        source_kind = "splits_metric" if has_splits else "laps"
+
         units = _extract_units(run)
         if not units:
             continue
@@ -186,7 +198,6 @@ def detect_quality_blocks(
 
         for idx, unit in enumerate(units):
             unit_distance_km = _unit_distance_km(unit)
-            unit_start_km = cumulative_distances_km[idx]
             unit_end_km = cumulative_distances_km[idx + 1]
 
             if unit_end_km <= second_half_threshold:
