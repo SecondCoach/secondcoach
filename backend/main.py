@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from starlette.middleware.sessions import SessionMiddleware
 
 import requests
@@ -33,13 +33,8 @@ def health():
     return {"status": "ok"}
 
 
-# ---------------------------
-# STRAVA LOGIN
-# ---------------------------
-
 @app.get("/login")
 def login():
-
     params = {
         "client_id": settings.STRAVA_CLIENT_ID,
         "response_type": "code",
@@ -56,7 +51,6 @@ def login():
 
 @app.get("/callback")
 def callback(request: Request, code: str):
-
     response = requests.post(
         STRAVA_TOKEN_URL,
         data={
@@ -69,7 +63,6 @@ def callback(request: Request, code: str):
     )
 
     data = response.json()
-
     athlete = data["athlete"]
 
     upsert_user(
@@ -87,16 +80,10 @@ def callback(request: Request, code: str):
     return RedirectResponse("/api/analysis")
 
 
-# ---------------------------
-# ANALYSIS
-# ---------------------------
-
 @app.get("/api/analysis")
 def analysis(request: Request):
-
     athlete_id = request.session.get("athlete_id")
 
-    # modo local: permite probar sin OAuth
     if not athlete_id:
         athlete_id = 1388857
 
@@ -107,7 +94,6 @@ def analysis(request: Request):
 
     acts = []
 
-    # solo intentamos refresh / llamada real si hay token válido
     access_token = user.get("access_token")
     if access_token and access_token != "DUMMY":
         user = refresh_access_token_if_needed(user)
@@ -126,18 +112,13 @@ def analysis(request: Request):
         except Exception:
             payload = []
 
-        # Strava correcto: lista de actividades
         if isinstance(payload, list):
             acts = payload
-        else:
-            acts = []
 
     runs = [a for a in acts if isinstance(a, dict) and a.get("type") == "Run"]
 
     km_7, avg_week, long_km = compute_training(runs)
-
     quality_blocks = detect_quality_blocks(runs)
-
     goal_pace_block_km = sum(b.get("km", 0) for b in quality_blocks) if quality_blocks else 0
 
     all_predictions = predict_all_distances(
@@ -182,18 +163,21 @@ def analysis(request: Request):
 
     return result
 
+
 @app.get("/api/bootstrap")
 def bootstrap(request: Request):
     return analysis(request)
 
-from fastapi.responses import HTMLResponse
-
 
 @app.get("/dashboard", response_class=HTMLResponse)
 def dashboard(request: Request):
-
     data = analysis(request)
 
+    race = data["race"]
+    status = data["status"]
+    prediction = data["prediction"]
+    training = data["training"]
+    coach = data["coach"]
     preds = data.get("all_predictions", {})
 
     html = f"""
@@ -202,104 +186,94 @@ def dashboard(request: Request):
         <title>SecondCoach</title>
         <style>
             body {{
-                font-family: Arial;
+                font-family: Arial, sans-serif;
                 background: #0f172a;
                 color: white;
                 text-align: center;
                 padding: 40px;
+                margin: 0;
             }}
             h1 {{
-                font-size: 42px;
+                font-size: 46px;
+                margin-bottom: 24px;
+            }}
+            .container {{
+                max-width: 700px;
+                margin: auto;
             }}
             .card {{
                 background: #1e293b;
                 border-radius: 12px;
-                padding: 20px;
+                padding: 24px;
                 margin: 20px auto;
-                width: 320px;
             }}
             .metric {{
-                font-size: 28px;
-                margin: 10px 0;
+                font-size: 30px;
+                margin: 8px 0;
+            }}
+            .small {{
+                font-size: 18px;
+                opacity: 0.8;
+            }}
+            .green {{
+                color: #22c55e;
+            }}
+            p {{
+                font-size: 18px;
+                line-height: 1.5;
             }}
         </style>
     </head>
-
     <body>
+        <div class="container">
+            <h1>SecondCoach</h1>
 
-        <h1>SecondCoach</h1>
+            <div class="card">
+                <div class="small">Objetivo</div>
+                <div class="metric">{race["name"]}</div>
+                <div class="small">Goal time</div>
+                <div class="metric">{race["goal_time"]}</div>
+            </div>
 
-        <div class="card">
-            <h2>Predicciones</h2>
-            <div class="metric">5K: {preds.get("5k")}</div>
-            <div class="metric">10K: {preds.get("10k")}</div>
-            <div class="metric">Media: {preds.get("half")}</div>
-            <div class="metric">Maratón: {preds.get("marathon")}</div>
+            <div class="card">
+                <div class="small">Predicción actual</div>
+                <div class="metric green">{prediction["predicted_time"]}</div>
+                <div class="small">rango {prediction["range_low"]} – {prediction["range_high"]}</div>
+            </div>
+
+            <div class="card">
+                <div class="small">Estado</div>
+                <div class="metric">{status["readiness_label"]}</div>
+            </div>
+
+            <div class="card">
+                <div class="small">Entrenamiento reciente</div>
+
+                <div class="small">Km últimos 7 días</div>
+                <div class="metric">{training["km_last_7_days"]}</div>
+
+                <div class="small">Promedio semanal</div>
+                <div class="metric">{training["weekly_average_km"]}</div>
+
+                <div class="small">Tirada larga</div>
+                <div class="metric">{training["long_run_km"]} km</div>
+            </div>
+
+            <div class="card">
+                <div class="small">Predicciones</div>
+                <div class="metric">5K — {preds.get("5k")}</div>
+                <div class="metric">10K — {preds.get("10k")}</div>
+                <div class="metric">Media — {preds.get("half")}</div>
+                <div class="metric">Maratón — {preds.get("marathon")}</div>
+            </div>
+
+            <div class="card">
+                <div class="small">Coach</div>
+                <p><b>👍 Positivo:</b> {coach["positive"]}</p>
+                <p><b>⚠️ Limitante:</b> {coach["limiter"]}</p>
+                <p><b>➡️ Próximo foco:</b> {coach["next_focus"]}</p>
+            </div>
         </div>
-
-        <div class="card">
-            <h2>Readiness</h2>
-            <div class="metric">{data["status"]["readiness_label"]}</div>
-        </div>
-
-    </body>
-    </html>
-    """
-
-    return HTMLResponse(html)
-
-from fastapi.responses import HTMLResponse
-
-
-@app.get("/dashboard", response_class=HTMLResponse)
-def dashboard(request: Request):
-
-    data = analysis(request)
-    preds = data.get("all_predictions", {})
-
-    html = f"""
-    <html>
-    <head>
-        <title>SecondCoach</title>
-        <style>
-            body {{
-                font-family: Arial;
-                background: #0f172a;
-                color: white;
-                text-align: center;
-                padding: 40px;
-            }}
-            .card {{
-                background: #1e293b;
-                border-radius: 12px;
-                padding: 20px;
-                margin: 20px auto;
-                width: 320px;
-            }}
-            .metric {{
-                font-size: 28px;
-                margin: 10px 0;
-            }}
-        </style>
-    </head>
-
-    <body>
-
-        <h1>SecondCoach</h1>
-
-        <div class="card">
-            <h2>Predicciones</h2>
-            <div class="metric">5K: {preds.get("5k")}</div>
-            <div class="metric">10K: {preds.get("10k")}</div>
-            <div class="metric">Media: {preds.get("half")}</div>
-            <div class="metric">Maratón: {preds.get("marathon")}</div>
-        </div>
-
-        <div class="card">
-            <h2>Estado</h2>
-            <div class="metric">{data["status"]["readiness_label"]}</div>
-        </div>
-
     </body>
     </html>
     """
