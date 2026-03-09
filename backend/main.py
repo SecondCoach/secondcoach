@@ -145,7 +145,7 @@ def analysis(request: Request):
     )
 
     goal_time = "3:30"
-    marathon_prediction = all_predictions.get("marathon")
+    marathon_prediction = None
     predicted_time = marathon_prediction or "3:25"
 
     pred_sec = time_to_seconds(predicted_time)
