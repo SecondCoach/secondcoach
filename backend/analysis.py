@@ -1,97 +1,66 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 
-def pace_sec_per_km(activity):
-    average_speed = activity.get("average_speed")
-    if not average_speed:
-        return None
-    return 1000 / average_speed
+def compute_training(runs):
+
+    now = datetime.utcnow()
+    week_ago = now - timedelta(days=7)
+    month_ago = now - timedelta(days=28)
+
+    km_last_7 = 0
+    km_last_28 = 0
+    long_run = 0
+
+    for r in runs:
+
+        dist_km = r["distance"] / 1000
+
+        date = datetime.fromisoformat(r["start_date"].replace("Z", "+00:00"))
+
+        if date > week_ago:
+            km_last_7 += dist_km
+
+        if date > month_ago:
+            km_last_28 += dist_km
+
+        if dist_km > long_run:
+            long_run = dist_km
+
+    weekly_avg = km_last_28 / 4 if km_last_28 else 0
+
+    return round(km_last_7, 1), round(weekly_avg, 1), round(long_run, 1)
 
 
-def _parse_strava_date(value: str) -> datetime:
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+def detect_quality_blocks(runs):
 
-
-def detect_marathon_pace_blocks(
-    runs,
-    target_pace_sec,
-    tolerance=15,
-    min_distance_km=4.0,
-    max_distance_km=18.0,
-    recent_days=56,
-):
     """
-    MVP sin splits:
-    detecta actividades recientes cuyo ritmo medio está cerca del ritmo objetivo.
-
-    Ajustes para evitar ambos errores:
-    - no sobrecontar todos los rodajes largos
-    - no quedarse en cero por ser demasiado estricto
+    Versión simple:
+    detecta bloques cercanos a ritmo maratón
+    usando laps de Strava.
     """
 
     blocks = []
 
-    lower = target_pace_sec - tolerance
-    upper = target_pace_sec + tolerance
-    now = datetime.now(timezone.utc)
+    for r in runs:
 
-    for run in runs:
-        pace = pace_sec_per_km(run)
-        if pace is None:
-            continue
+        if r.get("laps"):
 
-        start_date = run.get("start_date")
-        distance_m = run.get("distance", 0)
-        if not start_date or not distance_m:
-            continue
+            for lap in r["laps"]:
 
-        run_dt = _parse_strava_date(start_date)
-        if now - run_dt > timedelta(days=recent_days):
-            continue
+                km = lap["distance"] / 1000
 
-        distance_km = distance_m / 1000
+                if km < 0.8:
+                    continue
 
-        if not (min_distance_km <= distance_km <= max_distance_km):
-            continue
+                pace = lap["moving_time"] / km
 
-        if lower <= pace <= upper:
-            blocks.append(
-                {
-                    "distance": round(distance_km, 1),
-                    "pace": round(pace, 1),
-                    "date": start_date[:10],
-                    "name": run.get("name", "Run"),
-                }
-            )
+                # ritmo 4:45–5:05 (maratón ~3h30)
+
+                if 285 <= pace <= 305:
+
+                    blocks.append({
+                        "km": round(km, 2),
+                        "pace": pace
+                    })
 
     return blocks
-
-
-def training_volume(runs):
-    now = datetime.now(timezone.utc)
-
-    km_7 = 0.0
-    km_28 = 0.0
-    long_run = 0.0
-
-    for r in runs:
-        start_date = r.get("start_date")
-        distance_m = r.get("distance", 0)
-
-        if not start_date or not distance_m:
-            continue
-
-        d = _parse_strava_date(start_date)
-        km = distance_m / 1000
-
-        if now - d < timedelta(days=7):
-            km_7 += km
-
-        if now - d < timedelta(days=28):
-            km_28 += km
-
-        long_run = max(long_run, km)
-
-    avg_week = km_28 / 4 if km_28 else 0.0
-
-    return round(km_7, 1), round(avg_week, 1), round(long_run, 1)

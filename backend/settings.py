@@ -1,24 +1,18 @@
-from pathlib import Path
-from functools import lru_cache
-from starlette.config import Config
+from pydantic_settings import BaseSettings
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-ENV_FILE = BASE_DIR / ".env"
+class Settings(BaseSettings):
 
-config = Config(str(ENV_FILE))
+    STRAVA_CLIENT_ID: str
+    STRAVA_CLIENT_SECRET: str
+    STRAVA_REDIRECT_URI: str
 
+    APP_SESSION_SECRET: str = "dev-secret"
 
-class Settings:
-    STRAVA_CLIENT_ID: str = config("STRAVA_CLIENT_ID", cast=str)
-    STRAVA_CLIENT_SECRET: str = config("STRAVA_CLIENT_SECRET", cast=str)
-    STRAVA_REDIRECT_URI: str = config("STRAVA_REDIRECT_URI", cast=str)
-    APP_SESSION_SECRET: str = config("APP_SESSION_SECRET", cast=str, default="change-this-in-production")
+    DATABASE_URL: str
 
 
-@lru_cache
-def get_settings():
-    return Settings()
-
-
-settings = get_settings()
+settings = Settings()
