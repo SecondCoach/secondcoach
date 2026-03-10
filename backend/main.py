@@ -1,47 +1,20 @@
-recent_block = quality_blocks[0] if quality_blocks else None
+from datetime import datetime, timedelta, timezone
 
-if recent_block:
-    block_km = recent_block.get("km", 0)
-    block_date = recent_block.get("activity_date")
-
-    positive = (
-        f"Has realizado un bloque reciente de {block_km} km a ritmo maratón "
-        f"en tu tirada del {block_date}."
-    )
-else:
-    positive = "Tu volumen reciente es consistente, pero aún no aparecen bloques claros a ritmo maratón."
-
-if avg_week < 55:
-    limiter = "Tu volumen semanal medio aún es algo justo para consolidar un sub-3:30."
-else:
-    limiter = "El volumen semanal es adecuado, el limitante pasa a ser la especificidad."
-
-if goal_pace_block_km >= 12:
-    next_focus = "Mantén una tirada larga sólida y añade bloques de 8-10 km a ritmo maratón."
-else:
-    next_focus = "Introduce progresivamente bloques más largos a ritmo maratón dentro de las tiradas largas."
-
-"coach": {
-    "positive": positive,
-    "limiter": limiter,
-    "next_focus": next_focus,
-},from fastapi import FastAPI, Request
+import requests
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse
 from starlette.middleware.sessions import SessionMiddleware
 
-import requests
-
-from backend.settings import settings
-from backend.db import get_user_by_athlete_id, upsert_user
-from backend.strava_auth import refresh_access_token_if_needed
 from backend.analysis import compute_training, detect_quality_blocks
+from backend.db import get_user_by_athlete_id, upsert_user
 from backend.multi_distance import predict_all_distances
+from backend.settings import settings
+from backend.strava_auth import refresh_access_token_if_needed
 
 ACTIVITIES_URL = "https://www.strava.com/api/v3/athlete/activities"
 STRAVA_AUTHORIZE_URL = "https://www.strava.com/oauth/authorize"
 STRAVA_TOKEN_URL = "https://www.strava.com/oauth/token"
-
 STRAVA_ACTIVITY_DETAIL_URL = "https://www.strava.com/api/v3/activities/{activity_id}"
 
 
@@ -191,11 +164,12 @@ def analysis(request: Request):
         user = refresh_access_token_if_needed(user)
 
         headers = {"Authorization": f"Bearer {user['access_token']}"}
+        after_ts = int((datetime.now(timezone.utc) - timedelta(days=84)).timestamp())
 
         response = requests.get(
             ACTIVITIES_URL,
             headers=headers,
-            params={"per_page": 200},
+            params={"per_page": 200, "after": after_ts},
             timeout=30,
         )
 
@@ -277,7 +251,11 @@ def analysis(request: Request):
             "goal_pace_block_count": len(quality_blocks),
             "quality_blocks": quality_blocks,
         },
-        "coach": coach,
+        "coach": {
+            "positive": "Acumulas km recientes cerca del ritmo objetivo.",
+            "limiter": "Te falta algo de volumen semanal.",
+            "next_focus": "Mantén una tirada larga sólida y bloques de ritmo objetivo.",
+        },
         "all_predictions": display_predictions,
     }
 
