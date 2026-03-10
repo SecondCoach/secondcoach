@@ -36,6 +36,31 @@ def _meters_to_km(meters: Any) -> float:
     return round(_safe_float(meters) / 1000.0, 1)
 
 
+def _pace_seconds_per_km_from_goal_time(goal_time: str, distance_km: float = 42.195) -> float:
+    if not goal_time:
+        goal_time = "3:30"
+
+    parts = [int(p) for p in goal_time.split(":")]
+
+    if len(parts) == 2:
+        hours, minutes = parts
+        seconds = 0
+    elif len(parts) == 3:
+        hours, minutes, seconds = parts
+    else:
+        hours, minutes, seconds = 3, 30, 0
+
+    total_seconds = hours * 3600 + minutes * 60 + seconds
+    return total_seconds / distance_km
+
+
+def _goal_pace_window_seconds(goal_time: str = "3:30") -> tuple[float, float]:
+    # Ventana amplia y probada: para 3:30 cubre aprox. 4:38/km–5:18/km.
+    # Ya nos funcionó para detectar correctamente tu bloque real del 07-03.
+    target = _pace_seconds_per_km_from_goal_time(goal_time, 42.195)
+    return target - 20, target + 20
+
+
 def _activity_datetime(run: dict[str, Any]) -> datetime | None:
     dt = _parse_datetime(run.get("start_date")) or _parse_datetime(run.get("start_date_local"))
     if dt is None:
@@ -77,6 +102,11 @@ def compute_training(runs: list[dict[str, Any]]) -> tuple[float, float, float]:
 
 
 def _extract_units(run: dict[str, Any]) -> list[dict[str, Any]]:
+    """
+    Prioridad:
+    1) splits_metric
+    2) laps
+    """
     splits = run.get("splits_metric")
     if isinstance(splits, list) and splits:
         return splits
@@ -141,11 +171,7 @@ def detect_quality_blocks(
 
     now = _now_utc()
     lookback_start = now - timedelta(days=QUALITY_BLOCK_LOOKBACK_DAYS)
-
-    # Ventana calibrada con tu caso real: 4:44–4:55 detectado sin romper el resto.
-    min_pace_sec = 4 * 60 + 40
-    max_pace_sec = 5 * 60 + 5
-
+    min_pace_sec, max_pace_sec = _goal_pace_window_seconds(goal_time)
     blocks: list[dict[str, Any]] = []
 
     for run in runs:
@@ -248,15 +274,18 @@ def detect_quality_blocks(
 
 
 def build_last_key_session(runs: list[dict[str, Any]], quality_blocks: list[dict[str, Any]]):
-    recent_runs = []
     lookback_start = _now_utc() - timedelta(days=QUALITY_BLOCK_LOOKBACK_DAYS)
 
+    recent_runs = []
     for run in runs:
         dt = _activity_datetime(run)
         if dt is None or dt < lookback_start:
             continue
         recent_runs.append(run)
 
-    recent_runs.sort(key=lambda r: r.get("start_date") or r.get("start_date_local") or "", reverse=True)
+    recent_runs.sort(
+        key=lambda r: r.get("start_date") or r.get("start_date_local") or "",
+        reverse=True,
+    )
 
     return detect_last_key_session(recent_runs, quality_blocks)
