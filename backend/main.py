@@ -10,6 +10,7 @@ from backend.analysis import compute_training, detect_quality_blocks, build_last
 from backend.db import get_user_by_athlete_id, upsert_user
 from backend.multi_distance import predict_all_distances
 from backend.settings import settings
+from backend.db import init_db
 from backend.strava_auth import refresh_access_token_if_needed
 
 ACTIVITIES_URL = "https://www.strava.com/api/v3/athlete/activities"
@@ -93,6 +94,10 @@ def describe_session_type(session_type: str | None) -> str:
 
 
 app = FastAPI()
+@app.on_event("startup")
+def on_startup():
+    init_db()
+
 
 app.add_middleware(
     CORSMiddleware,
