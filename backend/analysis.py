@@ -83,7 +83,7 @@ def detect_quality_blocks(runs, goal_time="3:30", race_type="marathon"):
 
             pace_sec = 1000 / pace
 
-            if 4.8 * 60 <= pace_sec <= 5.1 * 60:
+            if 4.6 * 60 <= pace_sec <= 5.2 * 60:
 
                 if current_block == 0:
                     start_km = i
