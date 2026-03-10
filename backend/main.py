@@ -19,10 +19,6 @@ STRAVA_ACTIVITY_DETAIL_URL = "https://www.strava.com/api/v3/activities/{activity
 
 
 def hydrate_runs_for_quality_blocks(runs: list[dict], access_token: str) -> list[dict]:
-    """
-    La lista athlete/activities no siempre trae splits_metric/laps útiles.
-    Hidratamos solo las tiradas largas candidatas para detectar bloques MP.
-    """
     headers = {"Authorization": f"Bearer {access_token}"}
     enriched_runs: list[dict] = []
 
@@ -57,19 +53,6 @@ def hydrate_runs_for_quality_blocks(runs: list[dict], access_token: str) -> list
     return enriched_runs
 
 
-app = FastAPI()
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-app.add_middleware(SessionMiddleware, secret_key=settings.APP_SESSION_SECRET)
-
-
 def time_to_seconds(value: str | None) -> int | None:
     if not value:
         return None
@@ -95,6 +78,31 @@ def seconds_to_time(sec: int) -> str:
     m = (sec % 3600) // 60
     s = sec % 60
     return f"{h}:{m:02d}:{s:02d}"
+
+
+def describe_session_type(session_type: str | None) -> str:
+    mapping = {
+        "marathon_specific": "tirada específica de maratón",
+        "progressive_run": "tirada progresiva",
+        "race_or_test": "competición o test",
+        "long_run": "tirada larga",
+        "aerobic_run": "rodaje aeróbico",
+        "short_run": "rodaje corto",
+    }
+    return mapping.get(session_type or "", "sesión clave")
+
+
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.add_middleware(SessionMiddleware, secret_key=settings.APP_SESSION_SECRET)
 
 
 @app.get("/health")
@@ -232,23 +240,40 @@ def analysis(request: Request):
     display_predictions["marathon"] = predicted_time
 
     recent_block = quality_blocks[0] if quality_blocks else None
+    session_type = (last_key_session or {}).get("type")
+    session_label = describe_session_type(session_type)
+    session_date = (last_key_session or {}).get("date")
+    session_distance = (last_key_session or {}).get("distance_km")
 
-    if recent_block:
+    if recent_block and session_type == "marathon_specific":
+        block_km = recent_block.get("km", 0)
+        positive = (
+            f"Tu última sesión clave fue una {session_label} de {session_distance} km "
+            f"el {session_date}, con {block_km} km a ritmo maratón."
+        )
+    elif recent_block:
         block_km = recent_block.get("km", 0)
         block_date = recent_block.get("activity_date")
         positive = (
             f"Has realizado un bloque reciente de {block_km} km a ritmo maratón "
             f"en tu tirada del {block_date}."
         )
+    elif last_key_session:
+        positive = (
+            f"Tu última sesión clave fue una {session_label} de {session_distance} km "
+            f"el {session_date}."
+        )
     else:
-        positive = "Tu volumen reciente es consistente, pero aún no aparecen bloques claros a ritmo maratón."
+        positive = "Tu volumen reciente es consistente, pero aún no aparecen sesiones específicas claras."
 
     if avg_week < 55:
         limiter = "Tu volumen semanal medio aún es algo justo para consolidar un sub-3:30."
     else:
         limiter = "Tu volumen semanal es suficiente; ahora el foco está en mantener la especificidad."
 
-    if goal_pace_block_km >= 12:
+    if session_type == "marathon_specific" and goal_pace_block_km >= 12:
+        next_focus = "Mantén la especificidad: conserva la tirada larga y repite otro bloque de 8-10 km a ritmo maratón."
+    elif goal_pace_block_km >= 12:
         next_focus = "Mantén una tirada larga sólida y repite un bloque de 8-10 km a ritmo maratón."
     else:
         next_focus = "Introduce progresivamente bloques más largos a ritmo maratón dentro de las tiradas largas."
@@ -312,6 +337,17 @@ def dashboard(request: Request):
     training = data["training"]
     coach = data["coach"]
     preds = data.get("all_predictions", {})
+    last_key_session = data.get("last_key_session")
+
+    last_key_html = ""
+    if last_key_session:
+        last_key_html = f"""
+            <div class="card">
+                <div class="small">Última sesión clave</div>
+                <div class="metric">{describe_session_type(last_key_session.get("type"))}</div>
+                <div class="small">{last_key_session.get("date")} · {last_key_session.get("distance_km")} km</div>
+            </div>
+        """
 
     html = f"""
     <html>
@@ -378,6 +414,8 @@ def dashboard(request: Request):
                 <div class="small">Estado</div>
                 <div class="metric">{status["readiness_label"]}</div>
             </div>
+
+            {last_key_html}
 
             <div class="card">
                 <div class="small">Entrenamiento reciente</div>
