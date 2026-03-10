@@ -12,10 +12,49 @@ from backend.multi_distance import predict_all_distances
 from backend.settings import settings
 from backend.strava_auth import refresh_access_token_if_needed
 
-
 ACTIVITIES_URL = "https://www.strava.com/api/v3/athlete/activities"
 STRAVA_AUTHORIZE_URL = "https://www.strava.com/oauth/authorize"
 STRAVA_TOKEN_URL = "https://www.strava.com/oauth/token"
+STRAVA_ACTIVITY_DETAIL_URL = "https://www.strava.com/api/v3/activities/{activity_id}"
+
+
+def hydrate_runs_for_quality_blocks(runs: list[dict], access_token: str) -> list[dict]:
+    """
+    La lista athlete/activities no siempre trae splits_metric/laps útiles.
+    Hidratamos solo las tiradas largas candidatas para detectar bloques MP.
+    """
+    headers = {"Authorization": f"Bearer {access_token}"}
+    enriched_runs: list[dict] = []
+
+    for run in runs:
+        try:
+            distance_m = float(run.get("distance") or 0)
+        except (TypeError, ValueError):
+            distance_m = 0.0
+
+        if distance_m < 24000:
+            enriched_runs.append(run)
+            continue
+
+        activity_id = run.get("id")
+        if not activity_id:
+            enriched_runs.append(run)
+            continue
+
+        try:
+            detail_resp = requests.get(
+                STRAVA_ACTIVITY_DETAIL_URL.format(activity_id=activity_id),
+                headers=headers,
+                params={"include_all_efforts": "false"},
+                timeout=30,
+            )
+            detail_resp.raise_for_status()
+            detail = detail_resp.json()
+            enriched_runs.append(detail if isinstance(detail, dict) else run)
+        except Exception:
+            enriched_runs.append(run)
+
+    return enriched_runs
 
 
 app = FastAPI()
@@ -29,6 +68,33 @@ app.add_middleware(
 )
 
 app.add_middleware(SessionMiddleware, secret_key=settings.APP_SESSION_SECRET)
+
+
+def time_to_seconds(value: str | None) -> int | None:
+    if not value:
+        return None
+
+    parts = [int(p) for p in value.split(":")]
+
+    if len(parts) == 3:
+        h, m, s = parts
+        return h * 3600 + m * 60 + s
+
+    if len(parts) == 2:
+        h, m = parts
+        return h * 3600 + m * 60
+
+    return None
+
+
+def seconds_to_time(sec: int) -> str:
+    if sec < 0:
+        sec = 0
+
+    h = sec // 3600
+    m = (sec % 3600) // 60
+    s = sec % 60
+    return f"{h}:{m:02d}:{s:02d}"
 
 
 @app.get("/health")
@@ -85,7 +151,6 @@ def callback(request: Request, code: str):
 
 @app.get("/api/analysis")
 def analysis(request: Request):
-
     athlete_id = request.session.get("athlete_id")
 
     if not athlete_id:
@@ -94,44 +159,45 @@ def analysis(request: Request):
     user = get_user_by_athlete_id(athlete_id)
 
     if not user:
-        return {"error": "user_not_found"}
+        return {"error": "user_not_found", "athlete_id": athlete_id}
 
     acts = []
 
-    user = refresh_access_token_if_needed(user)
+    access_token = user.get("access_token")
+    if access_token and access_token != "DUMMY":
+        user = refresh_access_token_if_needed(user)
 
-    headers = {"Authorization": f"Bearer {user['access_token']}"}
+        headers = {"Authorization": f"Bearer {user['access_token']}"}
+        after_ts = int((datetime.now(timezone.utc) - timedelta(days=84)).timestamp())
 
-    after_ts = int((datetime.now(timezone.utc) - timedelta(days=84)).timestamp())
+        response = requests.get(
+            ACTIVITIES_URL,
+            headers=headers,
+            params={"per_page": 200, "after": after_ts},
+            timeout=30,
+        )
 
-    response = requests.get(
-        ACTIVITIES_URL,
-        headers=headers,
-        params={"per_page": 200, "after": after_ts},
-        timeout=30,
-    )
+        try:
+            payload = response.json()
+        except Exception:
+            payload = []
 
-    try:
-        payload = response.json()
-    except Exception:
-        payload = []
-
-    if isinstance(payload, list):
-        acts = payload
+        if isinstance(payload, list):
+            acts = payload
 
     runs = [a for a in acts if isinstance(a, dict) and a.get("type") == "Run"]
+    detailed_runs = hydrate_runs_for_quality_blocks(runs, user["access_token"])
 
     km_7, avg_week, long_km = compute_training(runs)
 
     quality_blocks = detect_quality_blocks(
-        runs,
+        detailed_runs,
         goal_time="3:30",
         race_type="marathon",
     )
 
-    goal_pace_block_km = sum(b.get("km", 0) for b in quality_blocks)
-
-    last_key_session = build_last_key_session(runs, quality_blocks)
+    goal_pace_block_km = sum(b.get("km", 0) for b in quality_blocks) if quality_blocks else 0
+    last_key_session = build_last_key_session(detailed_runs, quality_blocks)
 
     all_predictions = predict_all_distances(
         avg_week_km=avg_week,
@@ -139,17 +205,77 @@ def analysis(request: Request):
         goal_blocks_km=goal_pace_block_km,
     )
 
+    goal_time = "3:30"
+    predicted_time = "3:25"
+
+    pred_sec = time_to_seconds(predicted_time)
+    goal_sec = time_to_seconds(goal_time)
+
+    spread_minutes = 6
+    if avg_week < 45:
+        spread_minutes += 2
+    if goal_pace_block_km <= 0:
+        spread_minutes += 2
+    if long_km < 28:
+        spread_minutes += 1
+
+    spread_sec = spread_minutes * 60
+    range_low = seconds_to_time(pred_sec - spread_sec)
+    range_high = seconds_to_time(pred_sec + spread_sec)
+
+    if pred_sec is not None and goal_sec is not None:
+        minutes_vs_goal = round((pred_sec - goal_sec) / 60)
+    else:
+        minutes_vs_goal = 0
+
+    display_predictions = dict(all_predictions)
+    display_predictions["marathon"] = predicted_time
+
+    recent_block = quality_blocks[0] if quality_blocks else None
+
+    if recent_block:
+        block_km = recent_block.get("km", 0)
+        block_date = recent_block.get("activity_date")
+        positive = (
+            f"Has realizado un bloque reciente de {block_km} km a ritmo maratón "
+            f"en tu tirada del {block_date}."
+        )
+    else:
+        positive = "Tu volumen reciente es consistente, pero aún no aparecen bloques claros a ritmo maratón."
+
+    if avg_week < 55:
+        limiter = "Tu volumen semanal medio aún es algo justo para consolidar un sub-3:30."
+    else:
+        limiter = "Tu volumen semanal es suficiente; ahora el foco está en mantener la especificidad."
+
+    if goal_pace_block_km >= 12:
+        next_focus = "Mantén una tirada larga sólida y repite un bloque de 8-10 km a ritmo maratón."
+    else:
+        next_focus = "Introduce progresivamente bloques más largos a ritmo maratón dentro de las tiradas largas."
+
+    coach = {
+        "positive": positive,
+        "limiter": limiter,
+        "next_focus": next_focus,
+    }
+
     result = {
         "race": {
             "type": "marathon",
             "name": "Maratón de Zaragoza",
             "date": "2026-04-12",
-            "goal_time": "3:30",
+            "goal_time": goal_time,
         },
         "status": {
             "readiness": "on_track",
             "readiness_label": "En línea con el objetivo",
             "specificity": "high",
+        },
+        "prediction": {
+            "predicted_time": predicted_time,
+            "range_low": range_low,
+            "range_high": range_high,
+            "minutes_vs_goal": minutes_vs_goal,
         },
         "training": {
             "km_last_7_days": km_7,
@@ -157,18 +283,12 @@ def analysis(request: Request):
             "long_run_km": long_km,
             "quality_blocks_count": len(quality_blocks),
             "goal_pace_block_km": goal_pace_block_km,
+            "goal_pace_block_count": len(quality_blocks),
             "quality_blocks": quality_blocks,
         },
         "last_key_session": last_key_session,
-        "prediction": {
-            "predicted_time": "3:25"
-        },
-        "coach": {
-            "positive": "Acumulas km recientes cerca del ritmo objetivo.",
-            "limiter": "Te falta algo de volumen semanal.",
-            "next_focus": "Mantén una tirada larga sólida y bloques de ritmo objetivo.",
-        },
-        "all_predictions": all_predictions,
+        "coach": coach,
+        "all_predictions": display_predictions,
     }
 
     return result
@@ -181,7 +301,6 @@ def bootstrap(request: Request):
 
 @app.get("/dashboard", response_class=HTMLResponse)
 def dashboard(request: Request):
-
     data = analysis(request)
 
     if isinstance(data, RedirectResponse):
@@ -192,33 +311,102 @@ def dashboard(request: Request):
     prediction = data["prediction"]
     training = data["training"]
     coach = data["coach"]
+    preds = data.get("all_predictions", {})
 
     html = f"""
     <html>
     <head>
         <title>SecondCoach</title>
+        <style>
+            body {{
+                font-family: Arial, sans-serif;
+                background: #0f172a;
+                color: white;
+                text-align: center;
+                padding: 40px;
+                margin: 0;
+            }}
+            h1 {{
+                font-size: 46px;
+                margin-bottom: 24px;
+            }}
+            .container {{
+                max-width: 700px;
+                margin: auto;
+            }}
+            .card {{
+                background: #1e293b;
+                border-radius: 12px;
+                padding: 24px;
+                margin: 20px auto;
+            }}
+            .metric {{
+                font-size: 30px;
+                margin: 8px 0;
+            }}
+            .small {{
+                font-size: 18px;
+                opacity: 0.8;
+            }}
+            .green {{
+                color: #22c55e;
+            }}
+            p {{
+                font-size: 18px;
+                line-height: 1.5;
+            }}
+        </style>
     </head>
     <body>
-        <h1>SecondCoach</h1>
+        <div class="container">
+            <h1>SecondCoach</h1>
 
-        <h2>{race["name"]}</h2>
-        <p>Goal: {race["goal_time"]}</p>
+            <div class="card">
+                <div class="small">Objetivo</div>
+                <div class="metric">{race["name"]}</div>
+                <div class="small">Goal time</div>
+                <div class="metric">{race["goal_time"]}</div>
+            </div>
 
-        <h2>Predicción</h2>
-        <p>{prediction["predicted_time"]}</p>
+            <div class="card">
+                <div class="small">Predicción actual</div>
+                <div class="metric green">{prediction["predicted_time"]}</div>
+                <div class="small">rango {prediction["range_low"]} – {prediction["range_high"]}</div>
+            </div>
 
-        <h2>Estado</h2>
-        <p>{status["readiness_label"]}</p>
+            <div class="card">
+                <div class="small">Estado</div>
+                <div class="metric">{status["readiness_label"]}</div>
+            </div>
 
-        <h2>Entrenamiento</h2>
-        <p>Km últimos 7 días: {training["km_last_7_days"]}</p>
-        <p>Promedio semanal: {training["weekly_average_km"]}</p>
-        <p>Tirada larga: {training["long_run_km"]} km</p>
+            <div class="card">
+                <div class="small">Entrenamiento reciente</div>
 
-        <h2>Coach</h2>
-        <p>{coach["positive"]}</p>
-        <p>{coach["limiter"]}</p>
-        <p>{coach["next_focus"]}</p>
+                <div class="small">Km últimos 7 días</div>
+                <div class="metric">{training["km_last_7_days"]}</div>
+
+                <div class="small">Promedio semanal</div>
+                <div class="metric">{training["weekly_average_km"]}</div>
+
+                <div class="small">Tirada larga</div>
+                <div class="metric">{training["long_run_km"]} km</div>
+            </div>
+
+            <div class="card">
+                <div class="small">Predicciones</div>
+                <div class="metric">5K — {preds.get("5k")}</div>
+                <div class="metric">10K — {preds.get("10k")}</div>
+                <div class="metric">Media — {preds.get("half")}</div>
+                <div class="metric">Maratón — {preds.get("marathon")}</div>
+            </div>
+
+            <div class="card">
+                <div class="small">Coach</div>
+                <p><b>👍 Positivo:</b> {coach["positive"]}</p>
+                <p><b>⚠️ Limitante:</b> {coach["limiter"]}</p>
+                <p><b>➡️ Próximo foco:</b> {coach["next_focus"]}</p>
+            </div>
+        </div>
     </body>
     </html>
     """
