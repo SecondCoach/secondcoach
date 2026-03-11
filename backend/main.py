@@ -6,52 +6,21 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse
 from starlette.middleware.sessions import SessionMiddleware
 
-from backend.analysis import compute_training, detect_quality_blocks, build_last_key_session, compute_fatigue_signal
-from backend.db import get_user_by_athlete_id, upsert_user
+from backend.activity_details import enrich_runs_with_activity_details
+from backend.analysis import (
+    build_last_key_session,
+    compute_fatigue_signal,
+    compute_training,
+    detect_quality_blocks,
+)
+from backend.db import get_user_by_athlete_id, init_db, upsert_user
 from backend.multi_distance import predict_all_distances
 from backend.settings import settings
-from backend.db import init_db
 from backend.strava_auth import refresh_access_token_if_needed
 
 ACTIVITIES_URL = "https://www.strava.com/api/v3/athlete/activities"
 STRAVA_AUTHORIZE_URL = "https://www.strava.com/oauth/authorize"
 STRAVA_TOKEN_URL = "https://www.strava.com/oauth/token"
-STRAVA_ACTIVITY_DETAIL_URL = "https://www.strava.com/api/v3/activities/{activity_id}"
-
-
-def hydrate_runs_for_quality_blocks(runs: list[dict], access_token: str) -> list[dict]:
-    headers = {"Authorization": f"Bearer {access_token}"}
-    enriched_runs: list[dict] = []
-
-    for run in runs:
-        try:
-            distance_m = float(run.get("distance") or 0)
-        except (TypeError, ValueError):
-            distance_m = 0.0
-
-        if distance_m < 24000:
-            enriched_runs.append(run)
-            continue
-
-        activity_id = run.get("id")
-        if not activity_id:
-            enriched_runs.append(run)
-            continue
-
-        try:
-            detail_resp = requests.get(
-                STRAVA_ACTIVITY_DETAIL_URL.format(activity_id=activity_id),
-                headers=headers,
-                params={"include_all_efforts": "false"},
-                timeout=30,
-            )
-            detail_resp.raise_for_status()
-            detail = detail_resp.json()
-            enriched_runs.append(detail if isinstance(detail, dict) else run)
-        except Exception:
-            enriched_runs.append(run)
-
-    return enriched_runs
 
 
 def time_to_seconds(value: str | None) -> int | None:
@@ -94,6 +63,8 @@ def describe_session_type(session_type: str | None) -> str:
 
 
 app = FastAPI()
+
+
 @app.on_event("startup")
 def on_startup():
     init_db()
@@ -205,19 +176,26 @@ def analysis(request: Request):
             acts = payload
 
     runs = [a for a in acts if isinstance(a, dict) and a.get("type") == "Run"]
-    detailed_runs = hydrate_runs_for_quality_blocks(runs, user["access_token"])
 
     km_7, avg_week, long_km = compute_training(runs)
     fatigue_signal = compute_fatigue_signal(runs)
+    goal_time = request.session.get("goal_time", settings.DEFAULT_GOAL_TIME)
+
+    headers = {"Authorization": f"Bearer {user['access_token']}"}
+    enriched_runs = enrich_runs_with_activity_details(
+        runs,
+        headers=headers,
+        min_distance_km=18.0,
+        max_candidates=12,
+    )
 
     quality_blocks = detect_quality_blocks(
-        detailed_runs,
-        goal_time="3:30",
-        race_type="marathon",
+        enriched_runs,
+        goal_time=goal_time,
     )
 
     goal_pace_block_km = sum(b.get("km", 0) for b in quality_blocks) if quality_blocks else 0
-    last_key_session = build_last_key_session(detailed_runs, quality_blocks)
+    last_key_session = build_last_key_session(enriched_runs, quality_blocks)
 
     all_predictions = predict_all_distances(
         avg_week_km=avg_week,
@@ -225,7 +203,6 @@ def analysis(request: Request):
         goal_blocks_km=goal_pace_block_km,
     )
 
-    goal_time = "3:30"
     predicted_time = all_predictions.get("marathon") or goal_time
 
     pred_sec = time_to_seconds(predicted_time)
@@ -239,14 +216,15 @@ def analysis(request: Request):
     if long_km < 28:
         spread_minutes += 1
 
+    if pred_sec is None:
+        pred_sec = goal_sec if goal_sec is not None else 0
+    if goal_sec is None:
+        goal_sec = pred_sec
+
     spread_sec = spread_minutes * 60
     range_low = seconds_to_time(pred_sec - spread_sec)
     range_high = seconds_to_time(pred_sec + spread_sec)
-
-    if pred_sec is not None and goal_sec is not None:
-        minutes_vs_goal = round((pred_sec - goal_sec) / 60)
-    else:
-        minutes_vs_goal = 0
+    minutes_vs_goal = round((pred_sec - goal_sec) / 60)
 
     display_predictions = dict(all_predictions)
     display_predictions["marathon"] = predicted_time
