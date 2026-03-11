@@ -5,8 +5,6 @@ from typing import Any
 
 
 QUALITY_BLOCK_LOOKBACK_DAYS = 28
-MARATHON_PACE_MIN_SEC_PER_KM = 285  # 4:45/km
-MARATHON_PACE_MAX_SEC_PER_KM = 305  # 5:05/km
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -68,9 +66,28 @@ def _unit_pace_sec_per_km(unit: dict[str, Any]) -> float:
     return moving_time / distance_km
 
 
-def _is_goal_pace_unit(unit: dict[str, Any]) -> bool:
+def _goal_pace_window(goal_time: str | None) -> tuple[float, float]:
+    """
+    Devuelve ventana de ritmo objetivo (seg/km) basada en el objetivo de maratón.
+    Usamos ±10 s/km alrededor del ritmo objetivo.
+    """
+    try:
+        raw = str(goal_time or "").strip()
+        h, m = raw.split(":")
+        total_seconds = int(h) * 3600 + int(m) * 60
+    except Exception:
+        total_seconds = 3 * 3600 + 30 * 60  # fallback razonable
+
+    marathon_km = 42.195
+    pace_sec_per_km = total_seconds / marathon_km
+
+    return pace_sec_per_km - 10, pace_sec_per_km + 10
+
+
+def _is_goal_pace_unit(unit: dict[str, Any], goal_time: str | None) -> bool:
     pace = _unit_pace_sec_per_km(unit)
-    return MARATHON_PACE_MIN_SEC_PER_KM <= pace <= MARATHON_PACE_MAX_SEC_PER_KM
+    min_pace, max_pace = _goal_pace_window(goal_time)
+    return min_pace <= pace <= max_pace
 
 
 def _build_quality_block(
@@ -136,7 +153,7 @@ def detect_quality_blocks(
     goal_time: str | None = None,
     race_type: str | None = None,
 ) -> list[dict[str, Any]]:
-    _ = (goal_time, race_type)
+    _ = race_type
 
     lookback_start = _now_utc() - timedelta(days=QUALITY_BLOCK_LOOKBACK_DAYS)
     blocks: list[dict[str, Any]] = []
@@ -190,7 +207,7 @@ def detect_quality_blocks(
                 current_unit_count = 0
                 continue
 
-            if _is_goal_pace_unit(unit):
+            if _is_goal_pace_unit(unit, goal_time):
                 if current_start_idx is None:
                     current_start_idx = idx
                 current_end_idx = idx
