@@ -293,7 +293,7 @@ def analysis(request: Request):
             f"({goal_time}). Ahora mismo falta especificidad y/o volumen para sostener ese ritmo."
         )
     elif avg_week < 55:
-        limiter = "Tu volumen semanal medio aún es algo justo para consolidar un sub-3:30."
+        limiter = f"Tu volumen semanal medio aún es algo justo para consolidar tu objetivo de {goal_time}."
     else:
         limiter = "Tu volumen semanal es suficiente; ahora el foco está en mantener la especificidad."
 
