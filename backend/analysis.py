@@ -136,7 +136,6 @@ def detect_quality_blocks(
     goal_time: str | None = None,
     race_type: str | None = None,
 ) -> list[dict[str, Any]]:
-    # Se aceptan goal_time y race_type para mantener compatibilidad con main.py.
     _ = (goal_time, race_type)
 
     lookback_start = _now_utc() - timedelta(days=QUALITY_BLOCK_LOOKBACK_DAYS)
@@ -396,36 +395,110 @@ def build_last_key_session(
     return best
 
 
-def compute_fatigue_signal(km_last_7_days: float, weekly_average_km: float) -> dict[str, Any]:
+def _compute_fatigue_from_runs(runs: list[dict[str, Any]]) -> dict[str, Any]:
+    now = _now_utc()
+    start_7 = now - timedelta(days=7)
+    start_28 = now - timedelta(days=28)
+
+    daily_km = [0.0] * 7
+    total_7 = 0.0
+    total_28 = 0.0
+
+    for run in runs:
+        dt = _activity_datetime(run)
+        if dt is None:
+            continue
+
+        km = _distance_km(run)
+
+        if dt >= start_28:
+            total_28 += km
+
+        if dt >= start_7:
+            total_7 += km
+            day_index = (now.date() - dt.date()).days
+            if 0 <= day_index < 7:
+                daily_km[day_index] += km
+
+    avg_28_week = total_28 / 4.0 if total_28 > 0 else 0.0
+    load_ratio = round(total_7 / avg_28_week, 2) if avg_28_week > 0 else 0.0
+
+    mean_7 = total_7 / 7.0
+    variance = sum((x - mean_7) ** 2 for x in daily_km) / 7.0
+    std_7 = variance ** 0.5
+
+    monotony = round(mean_7 / std_7, 2) if std_7 > 0 else 0.0
+    strain = round(total_7 * monotony, 1)
+
+    if load_ratio >= 1.35 or monotony >= 2.0:
+        status = "red"
+        label = "Fatiga alta"
+        message = "Tu carga reciente es muy alta o la semana está siendo demasiado monótona."
+    elif load_ratio >= 1.15 or monotony >= 1.5:
+        status = "yellow"
+        label = "Fatiga moderada"
+        message = "Tu carga reciente está algo por encima de lo habitual y la semana está siendo poco variada."
+    else:
+        status = "green"
+        label = "Fatiga controlada"
+        message = "Tu carga reciente está bien equilibrada."
+
+    return {
+        "status": status,
+        "label": label,
+        "load_ratio_7d_28d": load_ratio,
+        "monotony": monotony,
+        "strain": strain,
+        "message": message,
+    }
+
+
+def _compute_fatigue_from_summary(
+    km_last_7_days: float,
+    weekly_average_km: float,
+) -> dict[str, Any]:
+    load_ratio = round(km_last_7_days / weekly_average_km, 2) if weekly_average_km > 0 else 0.0
+
     if weekly_average_km <= 0:
         return {
             "status": "unknown",
             "label": "Sin datos suficientes",
-            "ratio_7d_vs_avg": 0.0,
+            "load_ratio_7d_28d": 0.0,
+            "monotony": 0.0,
+            "strain": 0.0,
             "message": "Aún no hay suficiente entrenamiento reciente para estimar fatiga.",
         }
 
-    ratio = round(km_last_7_days / weekly_average_km, 2)
-
-    if ratio >= 1.35:
-        return {
-            "status": "red",
-            "label": "Fatiga alta",
-            "ratio_7d_vs_avg": ratio,
-            "message": "Tu carga de 7 días está claramente por encima de tu media. Toca priorizar recuperación.",
-        }
-
-    if ratio >= 1.1:
-        return {
-            "status": "yellow",
-            "label": "Fatiga moderada",
-            "ratio_7d_vs_avg": ratio,
-            "message": "Tu carga reciente está algo por encima de tu media habitual. Vigila sensaciones y descanso.",
-        }
+    if load_ratio >= 1.35:
+        status = "red"
+        label = "Fatiga alta"
+        message = "Tu carga reciente está claramente por encima de lo habitual."
+    elif load_ratio >= 1.15:
+        status = "yellow"
+        label = "Fatiga moderada"
+        message = "Tu carga reciente está algo por encima de lo habitual."
+    else:
+        status = "green"
+        label = "Fatiga controlada"
+        message = "Tu carga reciente está en línea con tu media habitual."
 
     return {
-        "status": "green",
-        "label": "Fatiga controlada",
-        "ratio_7d_vs_avg": ratio,
-        "message": "Tu carga reciente está en línea con tu media habitual.",
+        "status": status,
+        "label": label,
+        "load_ratio_7d_28d": load_ratio,
+        "monotony": 0.0,
+        "strain": round(km_last_7_days, 1),
+        "message": message,
     }
+
+
+def compute_fatigue_signal(
+    runs_or_km_last_7_days: list[dict[str, Any]] | float,
+    weekly_average_km: float | None = None,
+) -> dict[str, Any]:
+    if isinstance(runs_or_km_last_7_days, list):
+        return _compute_fatigue_from_runs(runs_or_km_last_7_days)
+
+    km_last_7_days = _safe_float(runs_or_km_last_7_days)
+    weekly_avg = _safe_float(weekly_average_km)
+    return _compute_fatigue_from_summary(km_last_7_days, weekly_avg)
