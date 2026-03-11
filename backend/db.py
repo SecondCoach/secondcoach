@@ -3,7 +3,6 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
-from urllib.parse import urlparse
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./secondcoach.db")
 
@@ -37,7 +36,10 @@ def get_conn():
                 "DATABASE_URL apunta a Postgres pero psycopg2 no está instalado."
             ) from exc
 
-        conn = psycopg2.connect(_normalize_postgres_url(DATABASE_URL), cursor_factory=RealDictCursor)
+        conn = psycopg2.connect(
+            _normalize_postgres_url(DATABASE_URL),
+            cursor_factory=RealDictCursor,
+        )
         try:
             yield conn
         finally:
@@ -148,7 +150,14 @@ def upsert_user(
     access_token: str,
     refresh_token: str,
     expires_at: int,
+    username: Optional[str] = None,
+    firstname: Optional[str] = None,
+    lastname: Optional[str] = None,
 ) -> None:
+    # username, firstname y lastname se aceptan para mantener compatibilidad
+    # con main.py aunque en este MVP todavía no se persisten en la tabla.
+    _ = (username, firstname, lastname)
+
     now_iso = datetime.now(timezone.utc).isoformat()
 
     with get_conn() as conn:
