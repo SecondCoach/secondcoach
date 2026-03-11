@@ -107,7 +107,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.add_middleware(SessionMiddleware, secret_key=settings.APP_SESSION_SECRET)
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=settings.APP_SESSION_SECRET,
+    same_site="lax",
+    https_only=(settings.APP_ENV == "production"),
+    max_age=60 * 60 * 24 * 14,
+)
 
 
 @app.get("/health")
