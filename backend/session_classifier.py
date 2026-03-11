@@ -116,6 +116,18 @@ def classify_run(run: dict, quality_blocks: list[dict]) -> str:
     return "short_run"
 
 
+def _session_priority(session_type: str) -> int:
+    priorities = {
+        "marathon_specific": 5,
+        "long_run": 4,
+        "progressive_run": 3,
+        "race_or_test": 2,
+        "aerobic_run": 1,
+        "short_run": 0,
+    }
+    return priorities.get(session_type, 0)
+
+
 def detect_last_key_session(runs: list[dict], quality_blocks: list[dict]):
     if not runs:
         return None
@@ -126,6 +138,8 @@ def detect_last_key_session(runs: list[dict], quality_blocks: list[dict]):
         reverse=True,
     )
 
+    best = None
+
     for run in runs_sorted:
         km = _distance_km(run)
 
@@ -133,11 +147,24 @@ def detect_last_key_session(runs: list[dict], quality_blocks: list[dict]):
             continue
 
         session_type = classify_run(run, quality_blocks)
-
-        return {
+        candidate = {
             "type": session_type,
             "date": (run.get("start_date_local") or run.get("start_date") or "")[:10],
             "distance_km": km,
         }
 
-    return None
+        if best is None:
+            best = candidate
+            continue
+
+        current_priority = _session_priority(candidate["type"])
+        best_priority = _session_priority(best["type"])
+
+        if current_priority > best_priority:
+            best = candidate
+            continue
+
+        if current_priority == best_priority and candidate["date"] > best["date"]:
+            best = candidate
+
+    return best
