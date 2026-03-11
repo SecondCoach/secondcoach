@@ -208,6 +208,7 @@ def analysis(request: Request):
     detailed_runs = hydrate_runs_for_quality_blocks(runs, user["access_token"])
 
     km_7, avg_week, long_km = compute_training(runs)
+    fatigue_signal = compute_fatigue_signal(runs)
 
     quality_blocks = detect_quality_blocks(
         detailed_runs,
