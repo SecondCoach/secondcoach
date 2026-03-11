@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse
 from starlette.middleware.sessions import SessionMiddleware
 
-from backend.analysis import compute_training, detect_quality_blocks, build_last_key_session
+from backend.analysis import compute_training, detect_quality_blocks, build_last_key_session, compute_fatigue_signal
 from backend.db import get_user_by_athlete_id, upsert_user
 from backend.multi_distance import predict_all_distances
 from backend.settings import settings
@@ -339,6 +339,7 @@ def analysis(request: Request):
             "goal_pace_block_count": len(quality_blocks),
             "quality_blocks": quality_blocks,
         },
+        "fatigue": fatigue_signal,
         "last_key_session": last_key_session,
         "coach": coach,
         "all_predictions": display_predictions,
