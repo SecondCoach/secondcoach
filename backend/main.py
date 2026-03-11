@@ -225,7 +225,7 @@ def analysis(request: Request):
     )
 
     goal_time = "3:30"
-    predicted_time = "3:25"
+    predicted_time = all_predictions.get("marathon") or goal_time
 
     pred_sec = time_to_seconds(predicted_time)
     goal_sec = time_to_seconds(goal_time)
