@@ -131,7 +131,14 @@ def compute_training(runs: list[dict[str, Any]]) -> tuple[float, float, float]:
     return round(km_last_7_days, 1), round(weekly_average_km, 1), round(long_run_km, 1)
 
 
-def detect_quality_blocks(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def detect_quality_blocks(
+    runs: list[dict[str, Any]],
+    goal_time: str | None = None,
+    race_type: str | None = None,
+) -> list[dict[str, Any]]:
+    # Se aceptan goal_time y race_type para mantener compatibilidad con main.py.
+    _ = (goal_time, race_type)
+
     lookback_start = _now_utc() - timedelta(days=QUALITY_BLOCK_LOOKBACK_DAYS)
     blocks: list[dict[str, Any]] = []
 
