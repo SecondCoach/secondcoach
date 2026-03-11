@@ -277,12 +277,29 @@ def analysis(request: Request):
     else:
         positive = "Tu volumen reciente es consistente, pero aún no aparecen sesiones específicas claras."
 
-    if avg_week < 55:
+    if minutes_vs_goal <= -5:
+        readiness = "ahead"
+        readiness_label = "Por delante del objetivo"
+    elif minutes_vs_goal >= 5:
+        readiness = "behind"
+        readiness_label = "Por detrás del objetivo"
+    else:
+        readiness = "on_track"
+        readiness_label = "En línea con el objetivo"
+
+    if minutes_vs_goal >= 10:
+        limiter = (
+            f"La predicción actual ({predicted_time}) está claramente por encima del objetivo "
+            f"({goal_time}). Ahora mismo falta especificidad y/o volumen para sostener ese ritmo."
+        )
+    elif avg_week < 55:
         limiter = "Tu volumen semanal medio aún es algo justo para consolidar un sub-3:30."
     else:
         limiter = "Tu volumen semanal es suficiente; ahora el foco está en mantener la especificidad."
 
-    if session_type == "marathon_specific" and goal_pace_block_km >= 12:
+    if minutes_vs_goal >= 10:
+        next_focus = "Prioriza dos semanas muy sólidas: tirada larga estable y más minutos continuos a ritmo objetivo."
+    elif session_type == "marathon_specific" and goal_pace_block_km >= 12:
         next_focus = "Mantén la especificidad: conserva la tirada larga y repite otro bloque de 8-10 km a ritmo maratón."
     elif goal_pace_block_km >= 12:
         next_focus = "Mantén una tirada larga sólida y repite un bloque de 8-10 km a ritmo maratón."
@@ -303,8 +320,8 @@ def analysis(request: Request):
             "goal_time": goal_time,
         },
         "status": {
-            "readiness": "on_track",
-            "readiness_label": "En línea con el objetivo",
+            "readiness": readiness,
+            "readiness_label": readiness_label,
             "specificity": "high",
         },
         "prediction": {
