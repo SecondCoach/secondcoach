@@ -288,6 +288,13 @@ def analysis(request: Request):
         readiness = "on_track"
         readiness_label = "En línea con el objetivo"
 
+    if session_type == "marathon_specific" and goal_pace_block_km >= 12:
+        specificity = "high"
+    elif goal_pace_block_km >= 6:
+        specificity = "medium"
+    else:
+        specificity = "low"
+
     if minutes_vs_goal >= 10:
         limiter = (
             f"La predicción actual ({predicted_time}) está claramente por encima del objetivo "
@@ -323,7 +330,7 @@ def analysis(request: Request):
         "status": {
             "readiness": readiness,
             "readiness_label": readiness_label,
-            "specificity": "high",
+            "specificity": specificity,
         },
         "prediction": {
             "predicted_time": predicted_time,
