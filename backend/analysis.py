@@ -67,16 +67,12 @@ def _unit_pace_sec_per_km(unit: dict[str, Any]) -> float:
 
 
 def _goal_pace_window(goal_time: str | None) -> tuple[float, float]:
-    """
-    Devuelve ventana de ritmo objetivo (seg/km) basada en el objetivo de maratón.
-    Usamos ±10 s/km alrededor del ritmo objetivo.
-    """
     try:
         raw = str(goal_time or "").strip()
         h, m = raw.split(":")
         total_seconds = int(h) * 3600 + int(m) * 60
     except Exception:
-        total_seconds = 3 * 3600 + 30 * 60  # fallback razonable
+        total_seconds = 3 * 3600 + 30 * 60
 
     marathon_km = 42.195
     pace_sec_per_km = total_seconds / marathon_km
@@ -99,9 +95,13 @@ def _build_quality_block(
     source_kind: str | None,
 ) -> dict[str, Any]:
     total_run_km = _distance_km(run)
-    start_km = round(cumulative_distances_km[start_index] + 1.0, 1)
+
+    # Corrección del desfase:
+    # si el bloque empieza en el split índice 22 (km 22→23),
+    # el inicio debe ser 22.0 y no 23.0.
+    start_km = round(cumulative_distances_km[start_index], 1)
     end_km = round(cumulative_distances_km[end_index + 1], 1)
-    block_km = round(end_km - cumulative_distances_km[start_index], 1)
+    block_km = round(end_km - start_km, 1)
 
     return {
         "km": block_km,
