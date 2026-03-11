@@ -288,4 +288,35 @@ def build_last_key_session(runs: list[dict[str, Any]], quality_blocks: list[dict
         reverse=True,
     )
 
+    recent_run_by_id = {
+        run.get("id"): run
+        for run in recent_runs
+        if run.get("id") is not None
+    }
+
+    recent_blocks = sorted(
+        quality_blocks or [],
+        key=lambda b: (
+            b.get("activity_date", ""),
+            _safe_float(b.get("start_km")),
+        ),
+        reverse=True,
+    )
+
+    for block in recent_blocks:
+        activity_id = block.get("activity_id")
+        run = recent_run_by_id.get(activity_id)
+        if not run:
+            continue
+
+        km = round(_safe_float(run.get("distance")) / 1000.0, 1)
+        if km < 20:
+            continue
+
+        return {
+            "type": "marathon_specific",
+            "date": (run.get("start_date_local") or run.get("start_date") or "")[:10],
+            "distance_km": km,
+        }
+
     return detect_last_key_session(recent_runs, quality_blocks)
