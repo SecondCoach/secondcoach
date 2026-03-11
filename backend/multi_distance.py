@@ -32,21 +32,31 @@ def _clamp(value, low, high):
     return max(low, min(high, value))
 
 
+def _synergy_bonus(long_run_km, goal_blocks_km):
+    bonus = 0
+
+    if long_run_km >= 28:
+        bonus += 180
+
+    if goal_blocks_km >= 10:
+        bonus += 180
+
+    if long_run_km >= 28 and goal_blocks_km >= 10:
+        bonus += 180
+
+    return bonus
+
+
 def predict_all_distances(avg_week_km, long_run_km, goal_blocks_km):
     """
-    MVP calibrado para que la predicción de maratón sea plausible
-    con las métricas que ya calcula SecondCoach.
+    Modelo MVP continuo para maratón.
+    Más sensible a:
+    - volumen semanal
+    - tirada larga
+    - km específicos a ritmo objetivo
 
-    Entradas:
-    - avg_week_km
-    - long_run_km
-    - goal_blocks_km
-
-    Salidas:
-    - 5k
-    - 10k
-    - half
-    - marathon
+    Mantiene una heurística simple, pero evita castigar demasiado
+    cuando ya hay tirada larga sólida + bloques específicos.
     """
 
     avg_week_km = _safe_float(avg_week_km)
@@ -61,17 +71,15 @@ def predict_all_distances(avg_week_km, long_run_km, goal_blocks_km):
             "marathon": None,
         }
 
-    # Heurística simple, pero calibrada:
-    # más volumen semanal, tirada larga y km a ritmo objetivo => mejor maratón
     marathon_seconds = (
-        15480
-        - avg_week_km * 20
-        - long_run_km * 30
-        - goal_blocks_km * 8
+        16500
+        - avg_week_km * 45
+        - long_run_km * 35
+        - goal_blocks_km * 20
+        - _synergy_bonus(long_run_km, goal_blocks_km)
     )
 
-    # límites razonables para evitar barbaridades
-    marathon_seconds = _clamp(marathon_seconds, 10800, 18000)  # 3:00:00 a 5:00:00
+    marathon_seconds = _clamp(marathon_seconds, 10800, 18000)
 
     pred_half = riegel(marathon_seconds, 42.195, 21.097)
     pred_10k = riegel(marathon_seconds, 42.195, 10)
