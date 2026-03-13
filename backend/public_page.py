@@ -1,295 +1,163 @@
-from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
 
-from backend.db import get_user_by_athlete_id
 
-router = APIRouter()
-
-
-@router.get("/p/{athlete_id}", response_class=HTMLResponse)
-def public_prediction_page(athlete_id: int):
-    user = get_user_by_athlete_id(athlete_id)
-
-    if not user:
-        return HTMLResponse("<h1>Runner no encontrado</h1>", status_code=404)
-
-    base_url = "https://secondcoach.onrender.com"
-
-    # URLs absolutas para redes sociales
-    og_image_url = f"{base_url}/share/{athlete_id}.png"
-    og_page_url = f"{base_url}/p/{athlete_id}"
-
-    # URLs relativas para que funcione también en local
-    image_url = f"/share/{athlete_id}.png"
-    login_url = "/login"
-    logo_url = "/static/secondcoach_logo.png"
-
-    firstname = (user.get("firstname") or "").strip()
-    username = (user.get("username") or "").strip()
-
-    runner_name = firstname or username or "Este runner"
-
-    headline = f"{runner_name.capitalize()} ya tiene una predicción de carrera con SecondCoach"
-    subheadline = (
-        "SecondCoach analiza entrenamientos de Strava y transforma datos complejos "
-        "en una lectura clara: predicción actual, margen frente al objetivo y señales reales de preparación."
-    )
+def render_public_page(athlete_id: int) -> HTMLResponse:
+    share_image = f"/share/{athlete_id}.png"
 
     html = f"""
 <!DOCTYPE html>
 <html lang="es">
 <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SecondCoach</title>
 
-    <meta property="og:title" content="¿Estoy listo para mi objetivo?">
-    <meta property="og:description" content="SecondCoach analiza entrenamientos de Strava y estima si vas en línea con tu objetivo.">
-    <meta property="og:image" content="{og_image_url}">
-    <meta property="og:type" content="website">
-    <meta property="og:url" content="{og_page_url}">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 
-    <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:title" content="¿Estoy listo para mi objetivo?">
-    <meta name="twitter:description" content="SecondCoach analiza entrenamientos de Strava y estima si vas en línea con tu objetivo.">
-    <meta name="twitter:image" content="{og_image_url}">
+<title>SecondCoach — Predicción de carrera</title>
 
-    <style>
-        :root {{
-            --bg: #08111f;
-            --panel: #0f1b2d;
-            --panel-2: #132238;
-            --text: #eef2f7;
-            --muted: #9aa4b2;
-            --accent: #ff5a1f;
-            --accent-2: #ff7a1f;
-            --border: rgba(255,255,255,0.08);
-            --shadow: 0 24px 60px rgba(0, 0, 0, 0.35);
-        }}
+<meta name="description" content="SecondCoach analiza entrenamientos de Strava y genera una predicción clara de rendimiento en carrera basada en volumen, carga y trabajo a ritmo objetivo.">
 
-        * {{
-            box-sizing: border-box;
-        }}
+<meta property="og:title" content="Predicción de carrera con SecondCoach">
+<meta property="og:description" content="SecondCoach analiza entrenamientos de Strava y transforma datos complejos en una lectura clara: predicción actual, margen frente al objetivo y señales reales de preparación.">
+<meta property="og:image" content="{share_image}">
+<meta property="og:type" content="website">
 
-        body {{
-            margin: 0;
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
-            background:
-                radial-gradient(circle at top left, rgba(255,90,31,0.10), transparent 28%),
-                radial-gradient(circle at bottom right, rgba(34,197,94,0.08), transparent 24%),
-                var(--bg);
-            color: var(--text);
-            min-height: 100vh;
-            padding: 28px 20px 48px;
-        }}
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="{share_image}">
 
-        .wrap {{
-            max-width: 760px;
-            margin: 0 auto;
-        }}
+<link rel="icon" href="/static/secondcoach_logo.png">
 
-        .hero {{
-            text-align: center;
-            margin-bottom: 20px;
-        }}
+<style>
 
-        .logo {{
-            width: 94px;
-            height: auto;
-            display: block;
-            margin: 0 auto 18px;
-        }}
+body {{
+font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+background: #ffffff;
+margin: 0;
+padding: 0;
+text-align: center;
+color: #111;
+}}
 
-        .eyebrow {{
-            color: var(--muted);
-            font-size: 15px;
-            letter-spacing: 0.08em;
-            text-transform: uppercase;
-            margin-bottom: 10px;
-        }}
+.hero {{
+padding: 60px 20px 40px 20px;
+}}
 
-        h1 {{
-            font-size: 42px;
-            line-height: 1.08;
-            margin: 0 0 14px;
-        }}
+.logo {{
+width: 120px;
+margin-bottom: 30px;
+}}
 
-        .sub {{
-            max-width: 640px;
-            margin: 0 auto;
-            font-size: 19px;
-            line-height: 1.55;
-            color: var(--muted);
-        }}
+h1 {{
+font-size: 34px;
+margin-bottom: 20px;
+}}
 
-        .proof {{
-            margin: 18px auto 0;
-            display: inline-block;
-            background: rgba(255,255,255,0.05);
-            border: 1px solid rgba(255,255,255,0.06);
-            border-radius: 999px;
-            padding: 10px 16px;
-            color: var(--text);
-            font-size: 15px;
-        }}
+.sub {{
+max-width: 680px;
+margin: auto;
+font-size: 18px;
+line-height: 1.5;
+color: #444;
+}}
 
-        .card {{
-            background: linear-gradient(180deg, var(--panel), var(--panel-2));
-            border: 1px solid var(--border);
-            border-radius: 24px;
-            box-shadow: var(--shadow);
-            padding: 22px;
-            overflow: hidden;
-        }}
+.section {{
+padding: 40px 20px;
+}}
 
-        .image-wrap {{
-            border-radius: 18px;
-            overflow: hidden;
-            background: #050b15;
-            border: 1px solid rgba(255,255,255,0.05);
-        }}
+.card {{
+max-width: 600px;
+margin: auto;
+}}
 
-        img.preview {{
-            display: block;
-            width: 100%;
-            height: auto;
-        }}
+.card img {{
+width: 100%;
+border-radius: 16px;
+box-shadow: 0 10px 30px rgba(0,0,0,0.15);
+}}
 
-        .copy {{
-            padding: 22px 6px 6px;
-            text-align: center;
-        }}
+.cta {{
+margin-top: 40px;
+}}
 
-        .copy h2 {{
-            font-size: 28px;
-            margin: 0 0 10px;
-        }}
+button {{
+background: black;
+color: white;
+border: none;
+padding: 16px 26px;
+font-size: 16px;
+border-radius: 8px;
+cursor: pointer;
+}}
 
-        .copy p {{
-            margin: 0 auto;
-            max-width: 560px;
-            font-size: 18px;
-            line-height: 1.55;
-            color: var(--muted);
-        }}
+.footer {{
+margin-top: 40px;
+color: #666;
+font-size: 14px;
+}}
 
-        .bullets {{
-            display: grid;
-            gap: 12px;
-            margin: 24px 0 0;
-            text-align: left;
-        }}
+</style>
 
-        .bullet {{
-            background: rgba(255,255,255,0.04);
-            border: 1px solid rgba(255,255,255,0.05);
-            border-radius: 14px;
-            padding: 14px 16px;
-            color: var(--text);
-            font-size: 17px;
-            line-height: 1.45;
-        }}
-
-        .cta-wrap {{
-            text-align: center;
-            margin-top: 28px;
-        }}
-
-        .cta {{
-            display: inline-block;
-            background: linear-gradient(90deg, var(--accent), var(--accent-2));
-            color: white;
-            padding: 16px 26px;
-            border-radius: 14px;
-            font-size: 18px;
-            font-weight: 700;
-            text-decoration: none;
-            box-shadow: 0 10px 24px rgba(255, 90, 31, 0.28);
-        }}
-
-        .foot {{
-            text-align: center;
-            margin-top: 16px;
-            color: var(--muted);
-            font-size: 14px;
-        }}
-
-        @media (max-width: 640px) {{
-            body {{
-                padding: 20px 14px 34px;
-            }}
-
-            .logo {{
-                width: 82px;
-            }}
-
-            h1 {{
-                font-size: 32px;
-            }}
-
-            .sub {{
-                font-size: 17px;
-            }}
-
-            .card {{
-                padding: 14px;
-                border-radius: 18px;
-            }}
-
-            .copy h2 {{
-                font-size: 24px;
-            }}
-
-            .copy p,
-            .bullet {{
-                font-size: 16px;
-            }}
-
-            .cta {{
-                width: 100%;
-                padding: 16px 18px;
-            }}
-        }}
-    </style>
 </head>
+
 <body>
-    <div class="wrap">
-        <div class="hero">
-            <img src="{logo_url}" alt="SecondCoach" class="logo">
-            <div class="eyebrow">SecondCoach</div>
-            <h1>{headline}</h1>
-            <p class="sub">{subheadline}</p>
-            <div class="proof">Basado en su actividad reciente de Strava</div>
-        </div>
 
-        <div class="card">
-            <div class="image-wrap">
-                <img src="{image_url}" alt="Predicción de carrera generada por SecondCoach" class="preview">
-            </div>
+<div class="hero">
 
-            <div class="copy">
-                <h2>Tu entrenamiento, explicado como lo haría un entrenador</h2>
-                <p>
-                    No solo muestra un tiempo estimado. Te dice si vas por delante, si estás en línea
-                    o si tu objetivo empieza a estar en riesgo.
-                </p>
+<img src="/static/secondcoach_logo.png" class="logo">
 
-                <div class="bullets">
-                    <div class="bullet">Dato → interpretación → decisión.</div>
-                    <div class="bullet">Volumen, tirada larga y trabajo a ritmo objetivo.</div>
-                    <div class="bullet">Una predicción fácil de entender y compartir.</div>
-                </div>
+<h1>Este runner ya tiene una predicción de carrera con SecondCoach</h1>
 
-                <div class="cta-wrap">
-                    <a class="cta" href="{login_url}">Conectar Strava y analizar mi entrenamiento</a>
-                </div>
+<p class="sub">
+SecondCoach analiza entrenamientos de Strava y transforma datos complejos
+en una lectura clara: predicción actual, margen frente al objetivo
+y señales reales de preparación.
+</p>
 
-                <div class="foot">SecondCoach · análisis de entrenamiento explicable</div>
-            </div>
-        </div>
-    </div>
+</div>
+
+<div class="section">
+
+<p><b>Basado en su actividad reciente de Strava</b></p>
+
+<div class="card">
+<img src="{share_image}">
+</div>
+
+</div>
+
+<div class="section">
+
+<h2>Tu entrenamiento, explicado como lo haría un entrenador</h2>
+
+<p class="sub">
+No solo muestra un tiempo estimado. Te dice si vas por delante, si estás en línea o si tu objetivo empieza a estar en riesgo.
+</p>
+
+<p class="sub">
+Dato → interpretación → decisión.
+</p>
+
+<p class="sub">
+Volumen, tirada larga y trabajo a ritmo objetivo.
+Una predicción fácil de entender y compartir.
+</p>
+
+</div>
+
+<div class="section cta">
+
+<a href="/login">
+<button>Conectar Strava y analizar mi entrenamiento</button>
+</a>
+
+</div>
+
+<div class="footer">
+
+SecondCoach · análisis de entrenamiento explicable
+
+</div>
+
 </body>
 </html>
 """
-
     return HTMLResponse(html)
