@@ -3,19 +3,25 @@ from datetime import datetime, timedelta, timezone
 import requests
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
 from backend.activity_details import enrich_runs_with_activity_details
 from backend.analysis import (
     build_last_key_session,
     compute_fatigue_signal,
+    compute_goal_progress,
     compute_training,
     detect_quality_blocks,
+    weeks_to_race,
 )
 from backend.db import get_user_by_athlete_id, init_db, upsert_user
 from backend.multi_distance import predict_all_distances
+from backend.public_page import router as public_router
 from backend.settings import settings
+from backend.share_card import render_share_card
+from backend.share_story import render_story_card
 from backend.strava_auth import refresh_access_token_if_needed
 
 ACTIVITIES_URL = "https://www.strava.com/api/v3/athlete/activities"
@@ -63,6 +69,8 @@ def describe_session_type(session_type: str | None) -> str:
 
 
 app = FastAPI()
+app.mount("/static", StaticFiles(directory="backend/static"), name="static")
+app.include_router(public_router)
 
 
 @app.on_event("startup")
@@ -87,70 +95,7 @@ app.add_middleware(
 )
 
 
-@app.get("/health")
-def health():
-    return {"status": "ok"}
-
-
-@app.get("/login")
-def login():
-    params = {
-        "client_id": settings.STRAVA_CLIENT_ID,
-        "response_type": "code",
-        "redirect_uri": settings.STRAVA_REDIRECT_URI,
-        "approval_prompt": "auto",
-        "scope": "read,activity:read_all",
-    }
-
-    query = "&".join([f"{k}={v}" for k, v in params.items()])
-    url = f"{STRAVA_AUTHORIZE_URL}?{query}"
-
-    return RedirectResponse(url)
-
-
-@app.get("/callback")
-def callback(request: Request, code: str):
-    response = requests.post(
-        STRAVA_TOKEN_URL,
-        data={
-            "client_id": settings.STRAVA_CLIENT_ID,
-            "client_secret": settings.STRAVA_CLIENT_SECRET,
-            "code": code,
-            "grant_type": "authorization_code",
-        },
-        timeout=30,
-    )
-
-    data = response.json()
-    athlete = data["athlete"]
-
-    upsert_user(
-        strava_athlete_id=athlete["id"],
-        access_token=data["access_token"],
-        refresh_token=data["refresh_token"],
-        expires_at=data["expires_at"],
-        username=athlete.get("username"),
-        firstname=athlete.get("firstname"),
-        lastname=athlete.get("lastname"),
-    )
-
-    request.session["athlete_id"] = athlete["id"]
-
-    return RedirectResponse("/api/analysis")
-
-
-@app.get("/api/analysis")
-def analysis(request: Request):
-    athlete_id = request.session.get("athlete_id")
-
-    if not athlete_id:
-        return RedirectResponse("/login")
-
-    user = get_user_by_athlete_id(athlete_id)
-
-    if not user:
-        return {"error": "user_not_found", "athlete_id": athlete_id}
-
+def build_analysis_payload(user: dict, goal_time: str) -> dict:
     acts = []
 
     access_token = user.get("access_token")
@@ -179,7 +124,6 @@ def analysis(request: Request):
 
     km_7, avg_week, long_km = compute_training(runs)
     fatigue_signal = compute_fatigue_signal(runs)
-    goal_time = request.session.get("goal_time", settings.DEFAULT_GOAL_TIME)
 
     headers = {"Authorization": f"Bearer {user['access_token']}"}
     enriched_runs = enrich_runs_with_activity_details(
@@ -298,45 +242,152 @@ def analysis(request: Request):
         "next_focus": next_focus,
     }
 
-    result = {
-        "race": {
-            "type": "marathon",
-            "name": "Maratón de Zaragoza",
-            "date": "2026-04-12",
-            "goal_time": goal_time,
-        },
+    race_date = "2026-04-12"
+
+    race = {
+        "type": "marathon",
+        "name": "Maratón de Zaragoza",
+        "date": race_date,
+        "goal_time": goal_time,
+        "weeks_to_race": weeks_to_race(race_date),
+    }
+
+    training = {
+        "km_last_7_days": km_7,
+        "weekly_average_km": avg_week,
+        "long_run_km": long_km,
+        "quality_blocks_count": len(quality_blocks),
+        "goal_pace_block_km": goal_pace_block_km,
+        "goal_pace_block_count": len(quality_blocks),
+        "quality_blocks": quality_blocks,
+    }
+
+    prediction = {
+        "predicted_time": predicted_time,
+        "range_low": range_low,
+        "range_high": range_high,
+        "minutes_vs_goal": minutes_vs_goal,
+    }
+
+    return {
+        "race": race,
         "status": {
             "readiness": readiness,
             "readiness_label": readiness_label,
             "specificity": specificity,
         },
-        "prediction": {
-            "predicted_time": predicted_time,
-            "range_low": range_low,
-            "range_high": range_high,
-            "minutes_vs_goal": minutes_vs_goal,
-        },
-        "training": {
-            "km_last_7_days": km_7,
-            "weekly_average_km": avg_week,
-            "long_run_km": long_km,
-            "quality_blocks_count": len(quality_blocks),
-            "goal_pace_block_km": goal_pace_block_km,
-            "goal_pace_block_count": len(quality_blocks),
-            "quality_blocks": quality_blocks,
-        },
+        "prediction": prediction,
+        "training": training,
         "fatigue": fatigue_signal,
+        "goal_progress": compute_goal_progress(race, prediction, training),
         "last_key_session": last_key_session,
         "coach": coach,
         "all_predictions": display_predictions,
     }
 
-    return result
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
+@app.get("/login")
+def login():
+    params = {
+        "client_id": settings.STRAVA_CLIENT_ID,
+        "response_type": "code",
+        "redirect_uri": settings.STRAVA_REDIRECT_URI,
+        "approval_prompt": "auto",
+        "scope": "read,activity:read_all",
+    }
+
+    query = "&".join([f"{k}={v}" for k, v in params.items()])
+    url = f"{STRAVA_AUTHORIZE_URL}?{query}"
+
+    return RedirectResponse(url)
+
+
+@app.get("/callback")
+def callback(request: Request, code: str):
+    response = requests.post(
+        STRAVA_TOKEN_URL,
+        data={
+            "client_id": settings.STRAVA_CLIENT_ID,
+            "client_secret": settings.STRAVA_CLIENT_SECRET,
+            "code": code,
+            "grant_type": "authorization_code",
+        },
+        timeout=30,
+    )
+
+    data = response.json()
+    athlete = data["athlete"]
+
+    upsert_user(
+        strava_athlete_id=athlete["id"],
+        access_token=data["access_token"],
+        refresh_token=data["refresh_token"],
+        expires_at=data["expires_at"],
+        username=athlete.get("username"),
+        firstname=athlete.get("firstname"),
+        lastname=athlete.get("lastname"),
+    )
+
+    request.session["athlete_id"] = athlete["id"]
+
+    return RedirectResponse("/api/analysis")
+
+
+@app.get("/api/analysis")
+def analysis(request: Request):
+    athlete_id = request.session.get("athlete_id")
+
+    if not athlete_id:
+        return RedirectResponse("/login")
+
+    user = get_user_by_athlete_id(athlete_id)
+
+    if not user:
+        return {"error": "user_not_found", "athlete_id": athlete_id}
+
+    goal_time = request.session.get("goal_time", settings.DEFAULT_GOAL_TIME)
+    return build_analysis_payload(user, goal_time)
 
 
 @app.get("/api/bootstrap")
 def bootstrap(request: Request):
     return analysis(request)
+
+
+@app.get("/share.png")
+def share_png(request: Request):
+    data = analysis(request)
+
+    if isinstance(data, RedirectResponse):
+        return data
+
+    return Response(content=render_share_card(data), media_type="image/png")
+
+
+@app.get("/share/{athlete_id}.png")
+def share_png_public(athlete_id: int):
+    user = get_user_by_athlete_id(athlete_id)
+
+    if not user:
+        return Response(status_code=404)
+
+    data = build_analysis_payload(user, settings.DEFAULT_GOAL_TIME)
+    return Response(content=render_share_card(data), media_type="image/png")
+
+
+@app.get("/story.png")
+def story_png(request: Request):
+    data = analysis(request)
+
+    if isinstance(data, RedirectResponse):
+        return data
+
+    return Response(content=render_story_card(data), media_type="image/png")
 
 
 @app.get("/dashboard", response_class=HTMLResponse)
@@ -363,6 +414,10 @@ def dashboard(request: Request):
                 <div class="small">{last_key_session.get("date")} · {last_key_session.get("distance_km")} km</div>
             </div>
         """
+
+    weeks_html = ""
+    if race.get("weeks_to_race") is not None:
+        weeks_html = f"""<div class="small">⏳ {race["weeks_to_race"]} semanas para la carrera</div>"""
 
     html = f"""
     <html>
@@ -417,6 +472,7 @@ def dashboard(request: Request):
                 <div class="metric">{race["name"]}</div>
                 <div class="small">Goal time</div>
                 <div class="metric">{race["goal_time"]}</div>
+                {weeks_html}
             </div>
 
             <div class="card">

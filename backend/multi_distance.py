@@ -1,136 +1,131 @@
-from math import pow
+from typing import Dict, Tuple, List
 
 
-def riegel(time_seconds, dist1_km, dist2_km):
-    if not dist1_km or time_seconds is None:
-        return None
-    return time_seconds * pow(dist2_km / dist1_km, 1.06)
+def _clamp(value: float, min_v: float, max_v: float) -> float:
+    return max(min_v, min(value, max_v))
 
 
-def seconds_to_time_str(seconds):
-    if seconds is None:
-        return None
-
-    seconds = int(round(seconds))
-    h = seconds // 3600
-    m = (seconds % 3600) // 60
-    s = seconds % 60
-
-    if h > 0:
-        return f"{h}:{m:02d}:{s:02d}"
-    return f"{m}:{s:02d}"
+def _sec_to_time(sec: float) -> str:
+    sec = int(sec)
+    h = sec // 3600
+    m = (sec % 3600) // 60
+    s = sec % 60
+    return f"{h}:{m:02d}:{s:02d}"
 
 
-def _safe_float(value):
-    try:
-        return float(value or 0)
-    except Exception:
-        return 0.0
-
-
-def _clamp(value, low, high):
-    return max(low, min(high, value))
-
-
-def _synergy_bonus(long_run_km, goal_blocks_km):
-    bonus = 0
-
-    if long_run_km >= 28:
-        bonus += 180
-
-    if goal_blocks_km >= 10:
-        bonus += 180
-
-    if long_run_km >= 28 and goal_blocks_km >= 10:
-        bonus += 180
-
-    return bonus
-
-
-def predict_all_distances(avg_week_km, long_run_km, goal_blocks_km):
+def predict_all_distances(
+    avg_week_km: float,
+    long_run_km: float,
+    goal_blocks_km: float,
+) -> Dict[str, str]:
     """
-    Modelo MVP continuo para maratón.
-    Más sensible a:
-    - volumen semanal
-    - tirada larga
-    - km específicos a ritmo objetivo
+    Prediction v2 core.
 
-    Mantiene una heurística simple, pero evita castigar demasiado
-    cuando ya hay tirada larga sólida + bloques específicos.
+    Inputs:
+    - weekly volume
+    - long run
+    - marathon pace blocks
+
+    Returns predicted times for distances.
     """
 
-    avg_week_km = _safe_float(avg_week_km)
-    long_run_km = _safe_float(long_run_km)
-    goal_blocks_km = _safe_float(goal_blocks_km)
+    base_marathon = 3 * 3600 + 30 * 60
 
-    if avg_week_km <= 0 and long_run_km <= 0 and goal_blocks_km <= 0:
-        return {
-            "5k": None,
-            "10k": None,
-            "half": None,
-            "marathon": None,
-        }
+    volume_factor = _clamp((avg_week_km - 40) / 40, -0.2, 0.2)
+    long_run_factor = _clamp((long_run_km - 24) / 20, -0.15, 0.15)
+    mp_factor = _clamp(goal_blocks_km / 60, 0, 0.12)
 
-    marathon_seconds = (
-        16500
-        - avg_week_km * 45
-        - long_run_km * 35
-        - goal_blocks_km * 20
-        - _synergy_bonus(long_run_km, goal_blocks_km)
+    adjustment = (
+        volume_factor * -900
+        + long_run_factor * -600
+        + mp_factor * -300
     )
 
-    marathon_seconds = _clamp(marathon_seconds, 10800, 18000)
+    marathon_sec = base_marathon + adjustment
+    marathon_sec = _clamp(marathon_sec, 3 * 3600 + 10 * 60, 4 * 3600)
 
-    pred_half = riegel(marathon_seconds, 42.195, 21.097)
-    pred_10k = riegel(marathon_seconds, 42.195, 10)
-    pred_5k = riegel(marathon_seconds, 42.195, 5)
+    k5 = marathon_sec * 0.105
+    k10 = marathon_sec * 0.218
+    half = marathon_sec * 0.46
 
     return {
-        "5k": seconds_to_time_str(pred_5k),
-        "10k": seconds_to_time_str(pred_10k),
-        "half": seconds_to_time_str(pred_half),
-        "marathon": seconds_to_time_str(marathon_seconds),
+        "5k": _sec_to_time(k5),
+        "10k": _sec_to_time(k10),
+        "half": _sec_to_time(half),
+        "marathon": _sec_to_time(marathon_sec),
     }
 
 
-def _time_str_to_seconds(value):
-    if not value:
-        return None
+def build_prediction_explanation(
+    avg_week_km: float,
+    long_run_km: float,
+    goal_blocks_km: float,
+    goal_time_sec: int,
+    predicted_sec: int,
+) -> Tuple[str, List[str], str]:
+    """
+    Builds:
+    - confidence
+    - why
+    - missing_for_goal
+    """
 
-    parts = str(value).split(":")
-    parts = [int(p) for p in parts]
+    why: List[str] = []
 
-    if len(parts) == 3:
-        h, m, s = parts
-        return h * 3600 + m * 60 + s
+    if avg_week_km >= 55:
+        why.append("Tu volumen semanal ya está en zona sólida para maratón.")
+    elif avg_week_km >= 45:
+        why.append("Tu volumen semanal es consistente.")
+    else:
+        why.append("Tu volumen semanal aún es limitado.")
 
-    if len(parts) == 2:
-        m, s = parts
-        return m * 60 + s
+    if long_run_km >= 28:
+        why.append("Estás haciendo tiradas largas suficientes.")
+    else:
+        why.append("Tus tiradas largas aún pueden crecer.")
 
-    return None
+    if goal_blocks_km >= 20:
+        why.append("Ya acumulas bastantes km a ritmo maratón.")
+    elif goal_blocks_km >= 10:
+        why.append("Empiezas a tener bloques específicos.")
+    else:
+        why.append("Aún faltan bloques largos a ritmo objetivo.")
 
+    # confidence
 
-def predict_goal(goal_time_seconds, goal_distance_km, predictions):
-    key_map = {
-        5: "5k",
-        10: "10k",
-        21: "half",
-        42: "marathon",
-    }
+    score = 0
 
-    key = key_map.get(goal_distance_km)
-    if not key:
-        return None
+    if avg_week_km >= 55:
+        score += 2
+    elif avg_week_km >= 45:
+        score += 1
 
-    predicted_seconds = _time_str_to_seconds(predictions.get(key))
-    if predicted_seconds is None:
-        return None
+    if long_run_km >= 28:
+        score += 2
+    elif long_run_km >= 24:
+        score += 1
 
-    diff = predicted_seconds - goal_time_seconds
+    if goal_blocks_km >= 20:
+        score += 2
+    elif goal_blocks_km >= 10:
+        score += 1
 
-    if diff < -300:
-        return "ahead"
-    if diff > 300:
-        return "behind"
-    return "on_track"
+    if score >= 5:
+        confidence = "high"
+    elif score >= 3:
+        confidence = "medium"
+    else:
+        confidence = "low"
+
+    # missing for goal
+
+    if predicted_sec <= goal_time_sec:
+        missing = "Mantener consistencia y evitar picos de fatiga."
+    elif avg_week_km < 55:
+        missing = "Algo más de volumen semanal consolidaría el objetivo."
+    elif goal_blocks_km < 15:
+        missing = "Más km continuos a ritmo maratón reforzarían la predicción."
+    else:
+        missing = "Consolidar semanas consistentes cerca del objetivo."
+
+    return confidence, why[:3], missing

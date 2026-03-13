@@ -390,3 +390,62 @@ def build_last_key_session(
         "distance_km": dist_km,
         "activity_id": run.get("id"),
     }
+
+
+def weeks_to_race(race_date: str | None) -> int | None:
+    """
+    Devuelve las semanas restantes hasta la carrera.
+    """
+    if not race_date:
+        return None
+
+    try:
+        race_dt = datetime.fromisoformat(race_date)
+        now = datetime.now()
+        days = (race_dt - now).days
+        return max(0, days // 7)
+    except Exception:
+        return None
+
+
+def compute_goal_progress(
+    race: dict[str, Any],
+    prediction: dict[str, Any],
+    training: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    Resumen simple para responder:
+    '¿Voy hacia mi objetivo?'
+    """
+    minutes_vs_goal = prediction.get("minutes_vs_goal", 0)
+
+    if minutes_vs_goal < -3:
+        status = "ahead"
+        label = "Vas por delante del objetivo"
+    elif minutes_vs_goal <= 5:
+        status = "on_track"
+        label = "Vas en línea con el objetivo"
+    else:
+        status = "at_risk"
+        label = "Hoy el objetivo está en riesgo"
+
+    weekly_km = float(training.get("weekly_average_km", 0) or 0)
+    goal_blocks = float(training.get("goal_pace_block_km", 0) or 0)
+    long_run = float(training.get("long_run_km", 0) or 0)
+
+    if weekly_km < 50:
+        main_lever = "Te falta volumen semanal estable."
+    elif goal_blocks < 15:
+        main_lever = "Necesitas más kilómetros a ritmo objetivo."
+    elif long_run < 28:
+        main_lever = "Te falta consolidar tiradas largas."
+    else:
+        main_lever = "Tu entrenamiento está bien alineado con el objetivo."
+
+    return {
+        "status": status,
+        "label": label,
+        "delta_vs_goal_minutes": minutes_vs_goal,
+        "weeks_to_race": weeks_to_race(race.get("date")),
+        "main_lever": main_lever,
+    }
