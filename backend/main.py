@@ -286,9 +286,27 @@ def build_analysis_payload(user: dict, goal_time: str) -> dict:
     }
 
 
+@app.get("/")
+def root(request: Request):
+    athlete_id = request.session.get("athlete_id")
+    if athlete_id:
+        return RedirectResponse("/dashboard")
+    return RedirectResponse("/login")
+
+
+@app.head("/")
+def root_head():
+    return Response(status_code=200)
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/favicon.ico")
+def favicon():
+    return Response(status_code=204)
 
 
 @app.get("/login")
@@ -328,14 +346,11 @@ def callback(request: Request, code: str):
         access_token=data["access_token"],
         refresh_token=data["refresh_token"],
         expires_at=data["expires_at"],
-        username=athlete.get("username"),
-        firstname=athlete.get("firstname"),
-        lastname=athlete.get("lastname"),
     )
 
     request.session["athlete_id"] = athlete["id"]
 
-    return RedirectResponse("/api/analysis")
+    return RedirectResponse("/dashboard")
 
 
 @app.get("/api/analysis")
