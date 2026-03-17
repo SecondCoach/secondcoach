@@ -1,4 +1,6 @@
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import base64
 
 import requests
 from fastapi import Body, FastAPI, Request
@@ -21,8 +23,8 @@ from backend.goal_store import get_user_goal, save_user_goal
 BASE_DIR = Path(__file__).resolve().parent.parent
 ASSETS_DIR = BASE_DIR / "backend" / "assets"
 
-CLIENT_ID = "208434"
-CLIENT_SECRET = "d2451805d4fd41607b6b6bed7160de4f635715f3"
+CLIENT_ID = "TU_CLIENT_ID_REAL"
+CLIENT_SECRET = "TU_CLIENT_SECRET_REAL"
 REDIRECT_URI = "https://secondcoach.onrender.com/callback"
 
 STRAVA_AUTHORIZE_URL = "https://www.strava.com/oauth/authorize"
@@ -59,8 +61,6 @@ def get_logo_data_uri() -> str:
     logo_path = ASSETS_DIR / "icon.png"
     if not logo_path.exists():
         return ""
-    import base64
-
     encoded = base64.b64encode(logo_path.read_bytes()).decode("utf-8")
     return f"data:image/png;base64,{encoded}"
 
@@ -193,12 +193,26 @@ def build_analysis_payload(request: Request) -> dict:
     training = compute_training(activities)
     quality_blocks = detect_quality_blocks(activities, race["goal_time"])
     fatigue = compute_fatigue_signal(activities)
-    progress = compute_goal_progress(race, prediction, training)
     last_key_session = build_last_key_session(quality_blocks)
     weeks_left = weeks_to_race(race["date"])
 
-    prediction = progress.get("prediction", {})
-    status = progress.get("status", {})
+    prediction = training.get("prediction", {})
+    if not isinstance(prediction, dict):
+        prediction = {}
+
+    prediction = {
+        "predicted_time": prediction.get("predicted_time", "—"),
+        "range_low": prediction.get("range_low", "—"),
+        "range_high": prediction.get("range_high", "—"),
+        "minutes_vs_goal": prediction.get("minutes_vs_goal", 0),
+    }
+
+    progress = compute_goal_progress(race, prediction, training)
+    status = {
+        "readiness": progress.get("status", "unknown"),
+        "readiness_label": progress.get("label", "Sin datos"),
+        "main_lever": progress.get("main_lever", ""),
+    }
 
     return {
         "athlete": athlete,
@@ -249,6 +263,7 @@ def render_dashboard_html(data: dict) -> str:
     athlete_name = athlete.get("firstname", "Atleta")
 
     readiness = status.get("readiness_label", "Sin datos")
+    main_lever = status.get("main_lever", "")
     predicted_time = prediction.get("predicted_time", "—")
     range_low = prediction.get("range_low", "—")
     range_high = prediction.get("range_high", "—")
@@ -370,7 +385,7 @@ def render_dashboard_html(data: dict) -> str:
           <div class="card">
             <div class="label">Estado</div>
             <div class="value">{readiness}</div>
-            <div class="small">Lectura basada en carga, sesiones y especificidad.</div>
+            <div class="small">{main_lever}</div>
           </div>
 
           <div class="card">
@@ -517,6 +532,10 @@ def onboarding(request: Request):
 
     if not athlete_id:
         return RedirectResponse(url="/login", status_code=302)
+
+    goal = get_user_goal(athlete_id)
+    if goal:
+        return RedirectResponse(url="/dashboard", status_code=302)
 
     return """
     <!doctype html>
