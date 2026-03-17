@@ -27,7 +27,9 @@ from backend.strava_auth import refresh_access_token_if_needed
 ACTIVITIES_URL = "https://www.strava.com/api/v3/athlete/activities"
 STRAVA_AUTHORIZE_URL = "https://www.strava.com/oauth/authorize"
 STRAVA_TOKEN_URL = "https://www.strava.com/oauth/token"
-
+CLIENT_ID = "208434"
+CLIENT_SECRET = "9bfa526853eadc6cfd2381f859fee8fa99b6bf04"
+REDIRECT_URI = "http://127.0.0.1:8000/callback"
 
 def time_to_seconds(value: str | None) -> int | None:
     if not value:
@@ -326,32 +328,52 @@ def login():
 
 
 @app.get("/callback")
-def callback(request: Request, code: str):
-    response = requests.post(
-        STRAVA_TOKEN_URL,
+def callback(request: Request):
+    code = request.query_params.get("code")
+    if not code:
+        return RedirectResponse(url="/login", status_code=302)
+
+    token_response = requests.post(
+        "https://www.strava.com/oauth/token",
         data={
-            "client_id": settings.STRAVA_CLIENT_ID,
-            "client_secret": settings.STRAVA_CLIENT_SECRET,
+            "client_id": CLIENT_ID,
+            "client_secret": CLIENT_SECRET,
             "code": code,
             "grant_type": "authorization_code",
         },
         timeout=30,
     )
 
-    data = response.json()
-    athlete = data["athlete"]
+    data = token_response.json() if token_response.content else {}
+
+    access_token = data.get("access_token")
+    refresh_token = data.get("refresh_token")
+    expires_at = data.get("expires_at")
+    athlete = data.get("athlete") or {}
+
+    athlete_id = athlete.get("id")
+    if not access_token or not athlete_id:
+        return HTMLResponse(
+            f"""
+            <h1>Error en login Strava</h1>
+            <p>No se pudo completar el callback.</p>
+            <pre>{data}</pre>
+            <p><a href="/login">Volver a intentar</a></p>
+            """,
+            status_code=400,
+        )
 
     upsert_user(
-        strava_athlete_id=athlete["id"],
-        access_token=data["access_token"],
-        refresh_token=data["refresh_token"],
-        expires_at=data["expires_at"],
+        strava_athlete_id=athlete_id,
+        access_token=access_token,
+        refresh_token=refresh_token,
+        expires_at=expires_at,
     )
 
-    request.session["athlete_id"] = athlete["id"]
+    request.session["access_token"] = access_token
+    request.session["athlete_id"] = athlete_id
 
-    return RedirectResponse("/dashboard")
-
+    return RedirectResponse(url="/dashboard", status_code=302)
 
 @app.get("/api/analysis")
 def analysis(request: Request):
