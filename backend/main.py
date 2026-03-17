@@ -193,7 +193,7 @@ def build_analysis_payload(request: Request) -> dict:
     training = compute_training(activities)
     quality_blocks = detect_quality_blocks(activities, race["goal_time"])
     fatigue = compute_fatigue_signal(activities)
-    progress = compute_goal_progress(training, quality_blocks, race)
+    progress = compute_goal_progress(race, prediction, training)
     last_key_session = build_last_key_session(quality_blocks)
     weeks_left = weeks_to_race(race["date"])
 
