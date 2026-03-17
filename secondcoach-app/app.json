@@ -1,0 +1,41 @@
+{
+  "expo": {
+    "name": "SecondCoach",
+    "slug": "secondcoach-app",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "scheme": "secondcoach",
+    "userInterfaceStyle": "light",
+    "backgroundColor": "#ffffff",
+    "plugins": [
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#ffffff",
+          "image": "./assets/icon.png",
+          "imageWidth": 180
+        }
+      ]
+    ],
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "package": "com.rafalobera.secondcoach.beta",
+      "versionCode": 10,
+      "icon": "./assets/icon.png",
+      "statusBar": {
+        "backgroundColor": "#ffffff"
+      }
+    },
+    "web": {
+      "favicon": "./assets/icon.png"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "e0ba6ed6-4f55-4ea9-9b9a-74a653d32a2d"
+      }
+    }
+  }
+}

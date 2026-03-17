@@ -536,3 +536,193 @@ def dashboard(request: Request):
     """
 
     return HTMLResponse(html)
+from fastapi import Body
+from backend.goal_store import save_user_goal, get_user_goal
+
+
+@app.post("/api/goal")
+def save_goal(request: Request, payload: dict = Body(...)):
+    athlete_id = request.session.get("athlete_id")
+
+    if not athlete_id:
+        return {"error": "not_authenticated"}
+
+    save_user_goal(
+        strava_athlete_id=athlete_id,
+        race_type=payload.get("race_type"),
+        race_name=payload.get("race_name"),
+        race_date=payload.get("race_date"),
+        goal_time=payload.get("goal_time"),
+    )
+
+    return {"status": "ok"}
+
+
+@app.get("/api/goal")
+def read_goal(request: Request):
+    athlete_id = request.session.get("athlete_id")
+
+    if not athlete_id:
+        return {"error": "not_authenticated"}
+
+    goal = get_user_goal(athlete_id)
+
+    return goal or {}
+@app.get("/start")
+def start(request: Request):
+    athlete_id = request.session.get("athlete_id")
+
+    if not athlete_id:
+        return RedirectResponse(url="/login", status_code=302)
+
+    goal = get_user_goal(athlete_id)
+
+    if not goal:
+        return RedirectResponse(url="/onboarding", status_code=302)
+
+    return RedirectResponse(url="/dashboard", status_code=302)
+
+
+@app.get("/onboarding", response_class=HTMLResponse)
+def onboarding(request: Request):
+    athlete_id = request.session.get("athlete_id")
+
+    if not athlete_id:
+        return RedirectResponse(url="/login", status_code=302)
+
+    goal = get_user_goal(athlete_id)
+    if goal:
+        return RedirectResponse(url="/dashboard", status_code=302)
+
+    return """
+    <!doctype html>
+    <html lang="es">
+    <head>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <title>SecondCoach · Objetivo</title>
+      <style>
+        body {
+          font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+          background: #f6f7fb;
+          margin: 0;
+          padding: 24px;
+          color: #111827;
+        }
+        .card {
+          max-width: 520px;
+          margin: 24px auto;
+          background: #ffffff;
+          border-radius: 16px;
+          padding: 24px;
+          box-shadow: 0 10px 30px rgba(0,0,0,0.08);
+        }
+        h1 {
+          font-size: 28px;
+          margin: 0 0 8px 0;
+        }
+        p {
+          color: #4b5563;
+          margin: 0 0 24px 0;
+        }
+        label {
+          display: block;
+          font-weight: 600;
+          margin: 16px 0 8px 0;
+        }
+        input, select {
+          width: 100%;
+          padding: 14px;
+          border: 1px solid #d1d5db;
+          border-radius: 12px;
+          font-size: 16px;
+          box-sizing: border-box;
+          background: #fff;
+        }
+        button {
+          width: 100%;
+          margin-top: 24px;
+          padding: 14px;
+          border: 0;
+          border-radius: 12px;
+          background: #111827;
+          color: white;
+          font-size: 16px;
+          font-weight: 700;
+          cursor: pointer;
+        }
+        .note {
+          margin-top: 14px;
+          font-size: 14px;
+          color: #6b7280;
+        }
+        .error {
+          color: #b91c1c;
+          margin-top: 12px;
+          display: none;
+        }
+      </style>
+    </head>
+    <body>
+      <div class="card">
+        <h1>¿Para qué carrera entrenas?</h1>
+        <p>Cuéntanos tu objetivo y ajustaremos el análisis a tu realidad.</p>
+
+        <form id="goal-form">
+          <label for="race_type">Tipo de carrera</label>
+          <select id="race_type" name="race_type" required>
+            <option value="marathon">Maratón</option>
+            <option value="half_marathon">Media maratón</option>
+            <option value="other">Otro</option>
+          </select>
+
+          <label for="race_name">Nombre de la carrera</label>
+          <input id="race_name" name="race_name" type="text" placeholder="Ej. Maratón de Zaragoza" required />
+
+          <label for="race_date">Fecha</label>
+          <input id="race_date" name="race_date" type="date" required />
+
+          <label for="goal_time">Objetivo</label>
+          <input id="goal_time" name="goal_time" type="text" placeholder="Ej. 3:30" required />
+
+          <button type="submit">Guardar y continuar</button>
+          <div id="error" class="error">No se pudo guardar. Inténtalo de nuevo.</div>
+        </form>
+
+        <div class="note">Dato → interpretación → decisión. Ese será el criterio de SecondCoach.</div>
+      </div>
+
+      <script>
+        const form = document.getElementById("goal-form");
+        const errorBox = document.getElementById("error");
+
+        form.addEventListener("submit", async (e) => {
+          e.preventDefault();
+          errorBox.style.display = "none";
+
+          const payload = {
+            race_type: document.getElementById("race_type").value,
+            race_name: document.getElementById("race_name").value,
+            race_date: document.getElementById("race_date").value,
+            goal_time: document.getElementById("goal_time").value
+          };
+
+          const response = await fetch("/api/goal", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+          });
+
+          const data = await response.json();
+
+          if (!response.ok || data.error) {
+            errorBox.style.display = "block";
+            return;
+          }
+
+          window.location.href = "/dashboard";
+        });
+      </script>
+    </body>
+    </html>
+    """
