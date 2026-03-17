@@ -1,11 +1,10 @@
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
-import base64
 
 import requests
-from fastapi import Body, FastAPI, Request
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
 from backend.activity_details import enrich_runs_with_activity_details
@@ -17,29 +16,67 @@ from backend.analysis import (
     detect_quality_blocks,
     weeks_to_race,
 )
-from backend.db import get_user_by_athlete_id, save_user
-from backend.goal_store import get_user_goal, save_user_goal
+from backend.db import get_user_by_athlete_id, init_db, upsert_user
+from backend.multi_distance import predict_all_distances
+from backend.public_page import router as public_router
+from backend.settings import settings
+from backend.share_card import render_share_card
+from backend.share_story import render_story_card
+from backend.strava_auth import refresh_access_token_if_needed
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-ASSETS_DIR = BASE_DIR / "backend" / "assets"
-
-CLIENT_ID = "208434"
-CLIENT_SECRET = "9bfa526853eadc6cfd2381f859fee8fa99b6bf04"
-REDIRECT_URI = "https://secondcoach.onrender.com/callback"
-
+ACTIVITIES_URL = "https://www.strava.com/api/v3/athlete/activities"
 STRAVA_AUTHORIZE_URL = "https://www.strava.com/oauth/authorize"
 STRAVA_TOKEN_URL = "https://www.strava.com/oauth/token"
-STRAVA_ATHLETE_URL = "https://www.strava.com/api/v3/athlete"
-STRAVA_ACTIVITIES_URL = "https://www.strava.com/api/v3/athlete/activities"
 
-DEFAULT_RACE = {
-    "type": "marathon",
-    "name": "Maratón objetivo",
-    "date": "2026-04-12",
-    "goal_time": "3:30",
-}
+
+def time_to_seconds(value: str | None) -> int | None:
+    if not value:
+        return None
+
+    parts = [int(p) for p in value.split(":")]
+
+    if len(parts) == 3:
+        h, m, s = parts
+        return h * 3600 + m * 60 + s
+
+    if len(parts) == 2:
+        h, m = parts
+        return h * 3600 + m * 60
+
+    return None
+
+
+def seconds_to_time(sec: int) -> str:
+    if sec < 0:
+        sec = 0
+
+    h = sec // 3600
+    m = (sec % 3600) // 60
+    s = sec % 60
+    return f"{h}:{m:02d}:{s:02d}"
+
+
+def describe_session_type(session_type: str | None) -> str:
+    mapping = {
+        "marathon_specific": "tirada específica de maratón",
+        "progressive_run": "tirada progresiva",
+        "race_or_test": "competición o test",
+        "long_run": "tirada larga",
+        "aerobic_run": "rodaje aeróbico",
+        "short_run": "rodaje corto",
+    }
+    return mapping.get(session_type or "", "sesión clave")
+
 
 app = FastAPI()
+app.mount("/static", StaticFiles(directory="backend/static"), name="static")
+app.include_router(public_router)
+
+
+@app.on_event("startup")
+def on_startup():
+    init_db()
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -51,719 +88,451 @@ app.add_middleware(
 
 app.add_middleware(
     SessionMiddleware,
-    secret_key="change-this-session-secret",
+    secret_key=settings.APP_SESSION_SECRET,
     same_site="lax",
-    https_only=False,
+    https_only=(settings.APP_ENV == "production"),
+    max_age=60 * 60 * 24 * 14,
 )
 
 
-def get_logo_data_uri() -> str:
-    logo_path = ASSETS_DIR / "icon.png"
-    if not logo_path.exists():
-        return ""
-    encoded = base64.b64encode(logo_path.read_bytes()).decode("utf-8")
-    return f"data:image/png;base64,{encoded}"
+def build_analysis_payload(user: dict, goal_time: str) -> dict:
+    acts = []
+
+    access_token = user.get("access_token")
+    if access_token and access_token != "DUMMY":
+        user = refresh_access_token_if_needed(user)
+
+        headers = {"Authorization": f"Bearer {user['access_token']}"}
+        after_ts = int((datetime.now(timezone.utc) - timedelta(days=84)).timestamp())
+
+        response = requests.get(
+            ACTIVITIES_URL,
+            headers=headers,
+            params={"per_page": 200, "after": after_ts},
+            timeout=30,
+        )
+
+        try:
+            payload = response.json()
+        except Exception:
+            payload = []
+
+        if isinstance(payload, list):
+            acts = payload
+
+    runs = [a for a in acts if isinstance(a, dict) and a.get("type") == "Run"]
+
+    km_7, avg_week, long_km = compute_training(runs)
+    fatigue_signal = compute_fatigue_signal(runs)
+
+    headers = {"Authorization": f"Bearer {user['access_token']}"}
+    enriched_runs = enrich_runs_with_activity_details(
+        runs,
+        headers=headers,
+        min_distance_km=18.0,
+        max_candidates=12,
+    )
+
+    quality_blocks = detect_quality_blocks(
+        enriched_runs,
+        goal_time=goal_time,
+    )
+
+    goal_pace_block_km = sum(b.get("km", 0) for b in quality_blocks) if quality_blocks else 0
+    last_key_session = build_last_key_session(enriched_runs, quality_blocks)
+
+    all_predictions = predict_all_distances(
+        avg_week_km=avg_week,
+        long_run_km=long_km,
+        goal_blocks_km=goal_pace_block_km,
+    )
+
+    predicted_time = all_predictions.get("marathon") or goal_time
+
+    pred_sec = time_to_seconds(predicted_time)
+    goal_sec = time_to_seconds(goal_time)
+
+    spread_minutes = 6
+    if avg_week < 45:
+        spread_minutes += 2
+    if goal_pace_block_km <= 0:
+        spread_minutes += 2
+    if long_km < 28:
+        spread_minutes += 1
+
+    if pred_sec is None:
+        pred_sec = goal_sec if goal_sec is not None else 0
+    if goal_sec is None:
+        goal_sec = pred_sec
+
+    spread_sec = spread_minutes * 60
+    range_low = seconds_to_time(pred_sec - spread_sec)
+    range_high = seconds_to_time(pred_sec + spread_sec)
+    minutes_vs_goal = round((pred_sec - goal_sec) / 60)
+
+    display_predictions = dict(all_predictions)
+    display_predictions["marathon"] = predicted_time
+
+    recent_block = quality_blocks[0] if quality_blocks else None
+    session_type = (last_key_session or {}).get("type")
+    session_label = describe_session_type(session_type)
+    session_date = (last_key_session or {}).get("date")
+    session_distance = (last_key_session or {}).get("distance_km")
+
+    if recent_block and session_type == "marathon_specific":
+        block_km = recent_block.get("km", 0)
+        positive = (
+            f"Tu última sesión clave fue una {session_label} de {session_distance} km "
+            f"el {session_date}, con {block_km} km a ritmo maratón."
+        )
+    elif recent_block:
+        block_km = recent_block.get("km", 0)
+        block_date = recent_block.get("activity_date")
+        positive = (
+            f"Has realizado un bloque reciente de {block_km} km a ritmo maratón "
+            f"en tu tirada del {block_date}."
+        )
+    elif last_key_session:
+        positive = (
+            f"Tu última sesión clave fue una {session_label} de {session_distance} km "
+            f"el {session_date}."
+        )
+    else:
+        positive = "Tu volumen reciente es consistente, pero aún no aparecen sesiones específicas claras."
+
+    if minutes_vs_goal <= -5:
+        readiness = "ahead"
+        readiness_label = "Por delante del objetivo"
+    elif minutes_vs_goal >= 5:
+        readiness = "behind"
+        readiness_label = "Por detrás del objetivo"
+    else:
+        readiness = "on_track"
+        readiness_label = "En línea con el objetivo"
+
+    if session_type == "marathon_specific" and goal_pace_block_km >= 12:
+        specificity = "high"
+    elif goal_pace_block_km >= 6:
+        specificity = "medium"
+    else:
+        specificity = "low"
+
+    if minutes_vs_goal >= 10:
+        limiter = (
+            f"La predicción actual ({predicted_time}) está claramente por encima del objetivo "
+            f"({goal_time}). Ahora mismo falta especificidad y/o volumen para sostener ese ritmo."
+        )
+    elif avg_week < 55:
+        limiter = f"Tu volumen semanal medio aún es algo justo para consolidar tu objetivo de {goal_time}."
+    else:
+        limiter = "Tu volumen semanal es suficiente; ahora el foco está en mantener la especificidad."
+
+    if minutes_vs_goal >= 10:
+        next_focus = "Prioriza dos semanas muy sólidas: tirada larga estable y más minutos continuos a ritmo objetivo."
+    elif session_type == "marathon_specific" and goal_pace_block_km >= 12:
+        next_focus = "Mantén la especificidad: conserva la tirada larga y repite otro bloque de 8-10 km a ritmo maratón."
+    elif goal_pace_block_km >= 12:
+        next_focus = "Mantén una tirada larga sólida y repite un bloque de 8-10 km a ritmo maratón."
+    else:
+        next_focus = "Introduce progresivamente bloques más largos a ritmo maratón dentro de las tiradas largas."
+
+    coach = {
+        "positive": positive,
+        "limiter": limiter,
+        "next_focus": next_focus,
+    }
+
+    race_date = "2026-04-12"
+
+    race = {
+        "type": "marathon",
+        "name": "Maratón de Zaragoza",
+        "date": race_date,
+        "goal_time": goal_time,
+        "weeks_to_race": weeks_to_race(race_date),
+    }
+
+    training = {
+        "km_last_7_days": km_7,
+        "weekly_average_km": avg_week,
+        "long_run_km": long_km,
+        "quality_blocks_count": len(quality_blocks),
+        "goal_pace_block_km": goal_pace_block_km,
+        "goal_pace_block_count": len(quality_blocks),
+        "quality_blocks": quality_blocks,
+    }
+
+    prediction = {
+        "predicted_time": predicted_time,
+        "range_low": range_low,
+        "range_high": range_high,
+        "minutes_vs_goal": minutes_vs_goal,
+    }
+
+    return {
+        "race": race,
+        "status": {
+            "readiness": readiness,
+            "readiness_label": readiness_label,
+            "specificity": specificity,
+        },
+        "prediction": prediction,
+        "training": training,
+        "fatigue": fatigue_signal,
+        "goal_progress": compute_goal_progress(race, prediction, training),
+        "last_key_session": last_key_session,
+        "coach": coach,
+        "all_predictions": display_predictions,
+    }
 
 
-def exchange_code_for_token(code: str) -> dict:
+@app.get("/")
+def root(request: Request):
+    athlete_id = request.session.get("athlete_id")
+    if athlete_id:
+        return RedirectResponse("/dashboard")
+    return RedirectResponse("/login")
+
+
+@app.head("/")
+def root_head():
+    return Response(status_code=200)
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
+@app.get("/favicon.ico")
+def favicon():
+    return Response(status_code=204)
+
+
+@app.get("/login")
+def login():
+    params = {
+        "client_id": settings.STRAVA_CLIENT_ID,
+        "response_type": "code",
+        "redirect_uri": settings.STRAVA_REDIRECT_URI,
+        "approval_prompt": "auto",
+        "scope": "read,activity:read_all",
+    }
+
+    query = "&".join([f"{k}={v}" for k, v in params.items()])
+    url = f"{STRAVA_AUTHORIZE_URL}?{query}"
+
+    return RedirectResponse(url)
+
+
+@app.get("/callback")
+def callback(request: Request, code: str):
     response = requests.post(
         STRAVA_TOKEN_URL,
         data={
-            "client_id": CLIENT_ID,
-            "client_secret": CLIENT_SECRET,
+            "client_id": settings.STRAVA_CLIENT_ID,
+            "client_secret": settings.STRAVA_CLIENT_SECRET,
             "code": code,
             "grant_type": "authorization_code",
         },
         timeout=30,
     )
-    return response.json()
 
-
-def refresh_access_token_if_needed(user: dict | None) -> dict | None:
-    if not user:
-        return None
-
-    expires_at = user.get("expires_at")
-    if not expires_at:
-        return user
-
-    try:
-        expires_dt = datetime.fromtimestamp(int(expires_at), tz=timezone.utc)
-    except Exception:
-        return user
-
-    if expires_dt > datetime.now(timezone.utc) + timedelta(minutes=5):
-        return user
-
-    refresh_token = user.get("refresh_token")
-    if not refresh_token:
-        return user
-
-    response = requests.post(
-        STRAVA_TOKEN_URL,
-        data={
-            "client_id": CLIENT_ID,
-            "client_secret": CLIENT_SECRET,
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-        },
-        timeout=30,
-    )
-    token_json = response.json()
-
-    access_token = token_json.get("access_token")
-    new_refresh_token = token_json.get("refresh_token", refresh_token)
-    new_expires_at = token_json.get("expires_at", expires_at)
-    athlete = token_json.get("athlete", {})
-    athlete_id = athlete.get("id") or user.get("strava_athlete_id")
-
-    if access_token and athlete_id:
-        save_user(
-            strava_athlete_id=athlete_id,
-            access_token=access_token,
-            refresh_token=new_refresh_token,
-            expires_at=new_expires_at,
-        )
-        user = get_user_by_athlete_id(athlete_id)
-
-    return user
-
-
-def get_current_access_token(request: Request) -> str | None:
-    athlete_id = request.session.get("athlete_id")
-    if not athlete_id:
-        return None
-
-    user = get_user_by_athlete_id(athlete_id)
-    user = refresh_access_token_if_needed(user)
-    if not user:
-        return None
-
-    access_token = user.get("access_token")
-    if access_token:
-        request.session["access_token"] = access_token
-    return access_token
-
-
-def get_current_race(request: Request) -> dict:
-    athlete_id = request.session.get("athlete_id")
-    if athlete_id:
-        goal = get_user_goal(athlete_id)
-        if goal:
-            return {
-                "type": goal.get("race_type") or DEFAULT_RACE["type"],
-                "name": goal.get("race_name") or DEFAULT_RACE["name"],
-                "date": goal.get("race_date") or DEFAULT_RACE["date"],
-                "goal_time": goal.get("goal_time") or DEFAULT_RACE["goal_time"],
-            }
-    return DEFAULT_RACE
-
-
-def fetch_athlete(access_token: str) -> dict:
-    response = requests.get(
-        STRAVA_ATHLETE_URL,
-        headers={"Authorization": f"Bearer {access_token}"},
-        timeout=30,
-    )
-    return response.json()
-
-
-def fetch_activities(access_token: str, per_page: int = 60) -> list[dict]:
-    response = requests.get(
-        STRAVA_ACTIVITIES_URL,
-        headers={"Authorization": f"Bearer {access_token}"},
-        params={"per_page": per_page, "page": 1},
-        timeout=30,
-    )
     data = response.json()
-    return data if isinstance(data, list) else []
+    athlete = data["athlete"]
 
-
-def build_analysis_payload(request: Request) -> dict:
-    access_token = get_current_access_token(request)
-    if not access_token:
-        return {"error": "not_authenticated"}
-
-    athlete = fetch_athlete(access_token)
-    activities = fetch_activities(access_token)
-    activities = enrich_runs_with_activity_details(access_token, activities)
-
-    race = get_current_race(request)
-
-    km_last_7, weekly_average_km, long_run_km = compute_training(activities)
-    quality_blocks = detect_quality_blocks(activities, race["goal_time"])
-    fatigue_raw = compute_fatigue_signal(activities)
-    last_key_session = build_last_key_session(activities, quality_blocks)
-    weeks_left = weeks_to_race(race["date"])
-
-    goal_pace_block_km = round(
-        sum(float(block.get("km", 0) or 0) for block in quality_blocks), 1
-    )
-    goal_pace_block_count = len(quality_blocks)
-
-    training = {
-        "km_last_7_days": km_last_7,
-        "km_last_14_days": round(weekly_average_km * 2, 1),
-        "km_last_28_days": round(weekly_average_km * 4, 1),
-        "weekly_average_km": weekly_average_km,
-        "long_run_km": long_run_km,
-        "quality_blocks_count": goal_pace_block_count,
-        "goal_pace_block_km": goal_pace_block_km,
-        "goal_pace_block_count": goal_pace_block_count,
-    }
-
-    prediction = {
-        "predicted_time": race.get("goal_time", "—"),
-        "range_low": race.get("goal_time", "—"),
-        "range_high": race.get("goal_time", "—"),
-        "minutes_vs_goal": 0,
-    }
-
-    progress = compute_goal_progress(race, prediction, training)
-
-    status = {
-        "readiness": progress.get("status", "unknown"),
-        "readiness_label": progress.get("label", "Sin datos"),
-        "main_lever": progress.get("main_lever", ""),
-    }
-
-    fatigue = {
-        "signal": fatigue_raw.get("status", "unknown"),
-        "signal_label": fatigue_raw.get("label", "Sin datos"),
-        "reason": fatigue_raw.get("message", ""),
-        "load_ratio_7d_28d": fatigue_raw.get("load_ratio_7d_28d"),
-        "monotony": fatigue_raw.get("monotony"),
-        "strain": fatigue_raw.get("strain"),
-    }
-
-    return {
-        "athlete": athlete,
-        "race": race,
-        "status": status,
-        "prediction": prediction,
-        "training": training,
-        "quality_blocks": quality_blocks,
-        "fatigue": fatigue,
-        "last_key_session": last_key_session or {},
-        "weeks_to_race": weeks_left,
-    }
-
-
-def render_dashboard_html(data: dict) -> str:
-    if data.get("error") == "not_authenticated":
-        return """
-        <!doctype html>
-        <html lang="es">
-        <head>
-          <meta charset="utf-8" />
-          <meta name="viewport" content="width=device-width, initial-scale=1" />
-          <title>SecondCoach</title>
-          <style>
-            body { font-family: -apple-system,BlinkMacSystemFont,sans-serif; background:#f6f7fb; padding:24px; }
-            .card { max-width:520px; margin:40px auto; background:#fff; border-radius:16px; padding:24px; box-shadow:0 10px 30px rgba(0,0,0,.08); text-align:center; }
-            a { display:inline-block; margin-top:18px; background:#111827; color:#fff; padding:12px 18px; border-radius:12px; text-decoration:none; font-weight:700; }
-          </style>
-        </head>
-        <body>
-          <div class="card">
-            <h1>SecondCoach</h1>
-            <p>Conecta tu cuenta de Strava para ver tu análisis.</p>
-            <a href="/login">Conectar con Strava</a>
-          </div>
-        </body>
-        </html>
-        """
-
-    logo = get_logo_data_uri()
-    athlete = data.get("athlete", {})
-    race = data.get("race", {})
-    status = data.get("status", {})
-    prediction = data.get("prediction", {})
-    training = data.get("training", {})
-    fatigue = data.get("fatigue", {})
-    last_key_session = data.get("last_key_session", {})
-    athlete_name = athlete.get("firstname", "Atleta")
-
-    readiness = status.get("readiness_label", "Sin datos")
-    main_lever = status.get("main_lever", "")
-    predicted_time = prediction.get("predicted_time", "—")
-    range_low = prediction.get("range_low", "—")
-    range_high = prediction.get("range_high", "—")
-    km_7 = training.get("km_last_7_days", "—")
-    km_14 = training.get("km_last_14_days", "—")
-    km_28 = training.get("km_last_28_days", "—")
-    long_run = training.get("long_run_km", "—")
-    fatigue_label = fatigue.get("signal_label", "Sin datos")
-    fatigue_reason = fatigue.get("reason", "—")
-    session_text = last_key_session.get("summary", "Sin sesión clave reciente.")
-
-    return f"""
-    <!doctype html>
-    <html lang="es">
-    <head>
-      <meta charset="utf-8" />
-      <meta name="viewport" content="width=device-width, initial-scale=1" />
-      <title>SecondCoach · Dashboard</title>
-      <style>
-        body {{
-          font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-          background: #f6f7fb;
-          margin: 0;
-          color: #111827;
-        }}
-        .wrap {{
-          max-width: 860px;
-          margin: 0 auto;
-          padding: 20px;
-        }}
-        .header {{
-          display: flex;
-          gap: 16px;
-          align-items: center;
-          margin-bottom: 20px;
-        }}
-        .logo {{
-          width: 64px;
-          height: 64px;
-          border-radius: 16px;
-          object-fit: cover;
-          background: white;
-        }}
-        h1 {{
-          margin: 0;
-          font-size: 28px;
-        }}
-        .sub {{
-          color: #6b7280;
-          margin-top: 4px;
-        }}
-        .grid {{
-          display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-          gap: 16px;
-        }}
-        .card {{
-          background: white;
-          border-radius: 18px;
-          padding: 18px;
-          box-shadow: 0 10px 24px rgba(0,0,0,0.06);
-        }}
-        .label {{
-          color: #6b7280;
-          font-size: 14px;
-          margin-bottom: 8px;
-        }}
-        .value {{
-          font-size: 28px;
-          font-weight: 800;
-        }}
-        .small {{
-          margin-top: 8px;
-          color: #4b5563;
-          font-size: 14px;
-          line-height: 1.4;
-        }}
-        .section {{
-          margin-top: 18px;
-        }}
-        .actions {{
-          margin-top: 18px;
-          display: flex;
-          gap: 12px;
-          flex-wrap: wrap;
-        }}
-        .button {{
-          display: inline-block;
-          text-decoration: none;
-          background: #111827;
-          color: white;
-          padding: 12px 16px;
-          border-radius: 12px;
-          font-weight: 700;
-        }}
-        .button.secondary {{
-          background: #e5e7eb;
-          color: #111827;
-        }}
-      </style>
-    </head>
-    <body>
-      <div class="wrap">
-        <div class="header">
-          {"<img class='logo' src='" + logo + "' alt='SecondCoach' />" if logo else ""}
-          <div>
-            <h1>SecondCoach</h1>
-            <div class="sub">{athlete_name}, este es tu estado real hoy.</div>
-          </div>
-        </div>
-
-        <div class="grid">
-          <div class="card">
-            <div class="label">Objetivo</div>
-            <div class="value">{race.get("goal_time", "—")}</div>
-            <div class="small">{race.get("name", "—")} · {race.get("date", "—")}</div>
-          </div>
-
-          <div class="card">
-            <div class="label">Estado</div>
-            <div class="value">{readiness}</div>
-            <div class="small">{main_lever}</div>
-          </div>
-
-          <div class="card">
-            <div class="label">Predicción</div>
-            <div class="value">{predicted_time}</div>
-            <div class="small">Rango estimado: {range_low} – {range_high}</div>
-          </div>
-
-          <div class="card">
-            <div class="label">Fatiga</div>
-            <div class="value">{fatigue_label}</div>
-            <div class="small">{fatigue_reason}</div>
-          </div>
-
-          <div class="card">
-            <div class="label">Volumen 7 / 14 / 28 días</div>
-            <div class="value">{km_7} / {km_14} / {km_28}</div>
-            <div class="small">Kilómetros acumulados recientes.</div>
-          </div>
-
-          <div class="card">
-            <div class="label">Tirada larga</div>
-            <div class="value">{long_run}</div>
-            <div class="small">Mayor salida larga detectada.</div>
-          </div>
-        </div>
-
-        <div class="card section">
-          <div class="label">Última sesión clave</div>
-          <div class="small">{session_text}</div>
-        </div>
-
-        <div class="actions">
-          <a class="button" href="/analysis">Ver análisis JSON</a>
-          <a class="button secondary" href="/onboarding">Editar objetivo</a>
-          <a class="button secondary" href="/login">Reconectar Strava</a>
-        </div>
-      </div>
-    </body>
-    </html>
-    """
-
-
-@app.get("/")
-@app.head("/")
-def root() -> RedirectResponse:
-    return RedirectResponse(url="/login", status_code=307)
-
-
-@app.get("/health")
-def health() -> dict:
-    return {"status": "ok"}
-
-
-@app.get("/favicon.ico")
-def favicon() -> Response:
-    return Response(status_code=204)
-
-
-@app.get("/login")
-def login() -> RedirectResponse:
-    params = {
-        "client_id": CLIENT_ID,
-        "redirect_uri": REDIRECT_URI,
-        "response_type": "code",
-        "approval_prompt": "auto",
-        "scope": "read,activity:read_all",
-    }
-    query = "&".join([f"{k}={v}" for k, v in params.items()])
-    return RedirectResponse(url=f"{STRAVA_AUTHORIZE_URL}?{query}", status_code=302)
-
-
-@app.get("/callback")
-def callback(request: Request):
-    code = request.query_params.get("code")
-
-    if not code:
-        return RedirectResponse(url="/login", status_code=302)
-
-    token_json = exchange_code_for_token(code)
-
-    access_token = token_json.get("access_token")
-    refresh_token = token_json.get("refresh_token")
-    expires_at = token_json.get("expires_at")
-    athlete = token_json.get("athlete")
-
-    if not access_token or not athlete:
-        return RedirectResponse(url="/login", status_code=302)
-
-    athlete_id = athlete.get("id")
-    if not athlete_id:
-        return RedirectResponse(url="/login", status_code=302)
-
-    save_user(
-        strava_athlete_id=athlete_id,
-        access_token=access_token,
-        refresh_token=refresh_token,
-        expires_at=expires_at,
+    upsert_user(
+        strava_athlete_id=athlete["id"],
+        access_token=data["access_token"],
+        refresh_token=data["refresh_token"],
+        expires_at=data["expires_at"],
     )
 
-    request.session["access_token"] = access_token
-    request.session["athlete_id"] = athlete_id
+    request.session["athlete_id"] = athlete["id"]
 
-    return RedirectResponse(url="/start", status_code=302)
+    return RedirectResponse("/dashboard")
 
 
 @app.get("/api/analysis")
-@app.get("/analysis")
 def analysis(request: Request):
-    return build_analysis_payload(request)
+    athlete_id = request.session.get("athlete_id")
+
+    if not athlete_id:
+        return RedirectResponse("/login")
+
+    user = get_user_by_athlete_id(athlete_id)
+
+    if not user:
+        return {"error": "user_not_found", "athlete_id": athlete_id}
+
+    goal_time = request.session.get("goal_time", settings.DEFAULT_GOAL_TIME)
+    return build_analysis_payload(user, goal_time)
+
+
+@app.get("/api/bootstrap")
+def bootstrap(request: Request):
+    return analysis(request)
+
+
+@app.get("/share.png")
+def share_png(request: Request):
+    data = analysis(request)
+
+    if isinstance(data, RedirectResponse):
+        return data
+
+    return Response(content=render_share_card(data), media_type="image/png")
+
+
+@app.get("/share/{athlete_id}.png")
+def share_png_public(athlete_id: int):
+    user = get_user_by_athlete_id(athlete_id)
+
+    if not user:
+        return Response(status_code=404)
+
+    data = build_analysis_payload(user, settings.DEFAULT_GOAL_TIME)
+    return Response(content=render_share_card(data), media_type="image/png")
+
+
+@app.get("/story.png")
+def story_png(request: Request):
+    data = analysis(request)
+
+    if isinstance(data, RedirectResponse):
+        return data
+
+    return Response(content=render_story_card(data), media_type="image/png")
 
 
 @app.get("/dashboard", response_class=HTMLResponse)
 def dashboard(request: Request):
-    data = build_analysis_payload(request)
+    data = analysis(request)
 
-    if data.get("error") == "not_authenticated":
-        return RedirectResponse(url="/login", status_code=302)
+    if isinstance(data, RedirectResponse):
+        return data
 
-    if "race" not in data:
-        return RedirectResponse(url="/start", status_code=302)
+    race = data["race"]
+    status = data["status"]
+    prediction = data["prediction"]
+    training = data["training"]
+    coach = data["coach"]
+    preds = data.get("all_predictions", {})
+    last_key_session = data.get("last_key_session")
 
-    return render_dashboard_html(data)
+    last_key_html = ""
+    if last_key_session:
+        last_key_html = f"""
+            <div class="card">
+                <div class="small">Última sesión clave</div>
+                <div class="metric">{describe_session_type(last_key_session.get("type"))}</div>
+                <div class="small">{last_key_session.get("date")} · {last_key_session.get("distance_km")} km</div>
+            </div>
+        """
 
+    weeks_html = ""
+    if race.get("weeks_to_race") is not None:
+        weeks_html = f"""<div class="small">⏳ {race["weeks_to_race"]} semanas para la carrera</div>"""
 
-@app.get("/start")
-def start(request: Request):
-    athlete_id = request.session.get("athlete_id")
-
-    if not athlete_id:
-        return RedirectResponse(url="/login", status_code=302)
-
-    goal = get_user_goal(athlete_id)
-
-    if not goal:
-        return RedirectResponse(url="/onboarding", status_code=302)
-
-    return RedirectResponse(url="/dashboard", status_code=302)
-
-
-@app.get("/onboarding", response_class=HTMLResponse)
-def onboarding(request: Request):
-    athlete_id = request.session.get("athlete_id")
-
-    if not athlete_id:
-        return RedirectResponse(url="/login", status_code=302)
-
-    goal = get_user_goal(athlete_id)
-    if goal:
-        return RedirectResponse(url="/dashboard", status_code=302)
-
-    return """
-    <!doctype html>
-    <html lang="es">
+    html = f"""
+    <html>
     <head>
-      <meta charset="utf-8" />
-      <meta name="viewport" content="width=device-width, initial-scale=1" />
-      <title>SecondCoach · Objetivo</title>
-      <style>
-        body {
-          font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-          background: #f6f7fb;
-          margin: 0;
-          padding: 24px;
-          color: #111827;
-        }
-        .card {
-          max-width: 520px;
-          margin: 24px auto;
-          background: #ffffff;
-          border-radius: 16px;
-          padding: 24px;
-          box-shadow: 0 10px 30px rgba(0,0,0,0.08);
-        }
-        h1 {
-          font-size: 28px;
-          margin: 0 0 8px 0;
-        }
-        p {
-          color: #4b5563;
-          margin: 0 0 24px 0;
-        }
-        label {
-          display: block;
-          font-weight: 600;
-          margin: 16px 0 8px 0;
-        }
-        input, select {
-          width: 100%;
-          padding: 14px;
-          border: 1px solid #d1d5db;
-          border-radius: 12px;
-          font-size: 16px;
-          box-sizing: border-box;
-          background: #fff;
-        }
-        button {
-          width: 100%;
-          margin-top: 24px;
-          padding: 14px;
-          border: 0;
-          border-radius: 12px;
-          background: #111827;
-          color: white;
-          font-size: 16px;
-          font-weight: 700;
-          cursor: pointer;
-        }
-        .note {
-          margin-top: 14px;
-          font-size: 14px;
-          color: #6b7280;
-        }
-        .error {
-          color: #b91c1c;
-          margin-top: 12px;
-          display: none;
-        }
-      </style>
+        <title>SecondCoach</title>
+        <style>
+            body {{
+                font-family: Arial, sans-serif;
+                background: #0f172a;
+                color: white;
+                text-align: center;
+                padding: 40px;
+                margin: 0;
+            }}
+            h1 {{
+                font-size: 46px;
+                margin-bottom: 24px;
+            }}
+            .container {{
+                max-width: 700px;
+                margin: auto;
+            }}
+            .card {{
+                background: #1e293b;
+                border-radius: 12px;
+                padding: 24px;
+                margin: 20px auto;
+            }}
+            .metric {{
+                font-size: 30px;
+                margin: 8px 0;
+            }}
+            .small {{
+                font-size: 18px;
+                opacity: 0.8;
+            }}
+            .green {{
+                color: #22c55e;
+            }}
+            p {{
+                font-size: 18px;
+                line-height: 1.5;
+            }}
+        </style>
     </head>
     <body>
-      <div class="card">
-        <h1>¿Para qué carrera entrenas?</h1>
-        <p>Cuéntanos tu objetivo y ajustaremos el análisis a tu realidad.</p>
+        <div class="container">
+            <h1>SecondCoach</h1>
 
-        <form id="goal-form">
-          <label for="race_type">Tipo de carrera</label>
-          <select id="race_type" name="race_type" required>
-            <option value="marathon">Maratón</option>
-            <option value="half_marathon">Media maratón</option>
-            <option value="other">Otro</option>
-          </select>
+            <div class="card">
+                <div class="small">Objetivo</div>
+                <div class="metric">{race["name"]}</div>
+                <div class="small">Goal time</div>
+                <div class="metric">{race["goal_time"]}</div>
+                {weeks_html}
+            </div>
 
-          <label for="race_name">Nombre de la carrera</label>
-          <input id="race_name" name="race_name" type="text" placeholder="Ej. Maratón de Zaragoza" required />
+            <div class="card">
+                <div class="small">Predicción actual</div>
+                <div class="metric green">{prediction["predicted_time"]}</div>
+                <div class="small">rango {prediction["range_low"]} – {prediction["range_high"]}</div>
+            </div>
 
-          <label for="race_date">Fecha</label>
-          <input id="race_date" name="race_date" type="date" required />
+            <div class="card">
+                <div class="small">Estado</div>
+                <div class="metric">{status["readiness_label"]}</div>
+            </div>
 
-          <label for="goal_time">Objetivo</label>
-          <input id="goal_time" name="goal_time" type="text" placeholder="Ej. 3:30" required />
+            {last_key_html}
 
-          <button type="submit">Guardar y continuar</button>
-          <div id="error" class="error">No se pudo guardar. Inténtalo de nuevo.</div>
-        </form>
+            <div class="card">
+                <div class="small">Entrenamiento reciente</div>
 
-        <div class="note">Dato → interpretación → decisión. Ese será el criterio de SecondCoach.</div>
-      </div>
+                <div class="small">Km últimos 7 días</div>
+                <div class="metric">{training["km_last_7_days"]}</div>
 
-      <script>
-        const form = document.getElementById("goal-form");
-        const errorBox = document.getElementById("error");
+                <div class="small">Promedio semanal</div>
+                <div class="metric">{training["weekly_average_km"]}</div>
 
-        form.addEventListener("submit", async (e) => {
-          e.preventDefault();
-          errorBox.style.display = "none";
+                <div class="small">Tirada larga</div>
+                <div class="metric">{training["long_run_km"]} km</div>
+            </div>
 
-          const payload = {
-            race_type: document.getElementById("race_type").value,
-            race_name: document.getElementById("race_name").value,
-            race_date: document.getElementById("race_date").value,
-            goal_time: document.getElementById("goal_time").value
-          };
+            <div class="card">
+                <div class="small">Predicciones</div>
+                <div class="metric">5K — {preds.get("5k")}</div>
+                <div class="metric">10K — {preds.get("10k")}</div>
+                <div class="metric">Media — {preds.get("half")}</div>
+                <div class="metric">Maratón — {preds.get("marathon")}</div>
+            </div>
 
-          const response = await fetch("/api/goal", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload)
-          });
-
-          const data = await response.json();
-
-          if (!response.ok || data.error) {
-            errorBox.style.display = "block";
-            return;
-          }
-
-          window.location.href = "/dashboard";
-        });
-      </script>
+            <div class="card">
+                <div class="small">Coach</div>
+                <p><b>👍 Positivo:</b> {coach["positive"]}</p>
+                <p><b>⚠️ Limitante:</b> {coach["limiter"]}</p>
+                <p><b>➡️ Próximo foco:</b> {coach["next_focus"]}</p>
+            </div>
+        </div>
     </body>
     </html>
     """
 
-
-@app.post("/api/goal")
-def api_save_goal(request: Request, payload: dict = Body(...)):
-    athlete_id = request.session.get("athlete_id")
-
-    if not athlete_id:
-        return {"error": "not_authenticated"}
-
-    save_user_goal(
-        strava_athlete_id=athlete_id,
-        race_type=payload.get("race_type"),
-        race_name=payload.get("race_name"),
-        race_date=payload.get("race_date"),
-        goal_time=payload.get("goal_time"),
-    )
-
-    return {"status": "ok"}
-
-
-@app.get("/api/goal")
-def api_read_goal(request: Request):
-    athlete_id = request.session.get("athlete_id")
-
-    if not athlete_id:
-        return {"error": "not_authenticated"}
-
-    goal = get_user_goal(athlete_id)
-    return goal or {}
-
-
-@app.get("/p/{athlete_id}", response_class=HTMLResponse)
-def public_page(athlete_id: int):
-    return f"""
-    <!doctype html>
-    <html lang="es">
-    <head>
-      <meta charset="utf-8" />
-      <meta name="viewport" content="width=device-width, initial-scale=1" />
-      <title>SecondCoach · Atleta</title>
-      <style>
-        body {{
-          font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-          background:#f6f7fb;
-          margin:0;
-          padding:24px;
-          color:#111827;
-        }}
-        .card {{
-          max-width:640px;
-          margin:24px auto;
-          background:#fff;
-          border-radius:16px;
-          padding:24px;
-          box-shadow:0 10px 30px rgba(0,0,0,.08);
-        }}
-      </style>
-    </head>
-    <body>
-      <div class="card">
-        <h1>Perfil público del atleta {athlete_id}</h1>
-        <p>Esta vista pública sigue disponible para compartir progreso desde SecondCoach.</p>
-      </div>
-    </body>
-    </html>
-    """
-
-
-@app.get("/share/{athlete_id}.png")
-def share_image(athlete_id: int):
-    return Response(status_code=204)
-
-
-@app.get("/marathon_pace")
-def marathon_pace():
-    return {"status": "ok"}
+    return HTMLResponse(html)
