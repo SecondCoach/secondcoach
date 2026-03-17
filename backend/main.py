@@ -350,13 +350,13 @@ def callback(request: Request):
     refresh_token = data.get("refresh_token")
     expires_at = data.get("expires_at")
     athlete = data.get("athlete") or {}
-
     athlete_id = athlete.get("id")
+
     if not access_token or not athlete_id:
         return HTMLResponse(
             f"""
-            <h1>Error en login Strava</h1>
-            <p>No se pudo completar el callback.</p>
+            <h1>Error en callback Strava</h1>
+            <p>La respuesta del token no incluye los datos esperados.</p>
             <pre>{data}</pre>
             <p><a href="/login">Volver a intentar</a></p>
             """,
@@ -374,7 +374,6 @@ def callback(request: Request):
     request.session["athlete_id"] = athlete_id
 
     return RedirectResponse(url="/dashboard", status_code=302)
-
 @app.get("/api/analysis")
 def analysis(request: Request):
     athlete_id = request.session.get("athlete_id")
