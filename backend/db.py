@@ -12,7 +12,7 @@ def get_connection() -> sqlite3.Connection:
     return conn
 
 
-def ensure_user_table() -> None:
+def init_db() -> None:
     with get_connection() as conn:
         conn.execute(
             """
@@ -30,13 +30,13 @@ def ensure_user_table() -> None:
         conn.commit()
 
 
-def save_user(
+def upsert_user(
     strava_athlete_id: int,
     access_token: str,
-    refresh_token: Optional[str],
-    expires_at: Optional[int],
+    refresh_token: Optional[str] = None,
+    expires_at: Optional[int] = None,
 ) -> None:
-    ensure_user_table()
+    init_db()
     with get_connection() as conn:
         conn.execute(
             """
@@ -57,7 +57,7 @@ def save_user(
 
 
 def get_user_by_athlete_id(strava_athlete_id: int) -> Optional[dict]:
-    ensure_user_table()
+    init_db()
     with get_connection() as conn:
         row = conn.execute(
             """
@@ -78,3 +78,17 @@ def get_user_by_athlete_id(strava_athlete_id: int) -> Optional[dict]:
         "expires_at": row["expires_at"],
         "updated_at": row["updated_at"],
     }
+
+
+def save_user(
+    strava_athlete_id: int,
+    access_token: str,
+    refresh_token: Optional[str] = None,
+    expires_at: Optional[int] = None,
+) -> None:
+    upsert_user(
+        strava_athlete_id=strava_athlete_id,
+        access_token=access_token,
+        refresh_token=refresh_token,
+        expires_at=expires_at,
+    )
