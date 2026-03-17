@@ -190,28 +190,50 @@ def build_analysis_payload(request: Request) -> dict:
 
     race = get_current_race(request)
 
-    training = compute_training(activities)
+    km_last_7, weekly_average_km, long_run_km = compute_training(activities)
     quality_blocks = detect_quality_blocks(activities, race["goal_time"])
-    fatigue = compute_fatigue_signal(activities)
+    fatigue_raw = compute_fatigue_signal(activities)
     last_key_session = build_last_key_session(activities, quality_blocks)
     weeks_left = weeks_to_race(race["date"])
 
-    prediction = training.get("prediction", {})
-    if not isinstance(prediction, dict):
-        prediction = {}
+    goal_pace_block_km = round(
+        sum(float(block.get("km", 0) or 0) for block in quality_blocks), 1
+    )
+    goal_pace_block_count = len(quality_blocks)
+
+    training = {
+        "km_last_7_days": km_last_7,
+        "km_last_14_days": round(weekly_average_km * 2, 1),
+        "km_last_28_days": round(weekly_average_km * 4, 1),
+        "weekly_average_km": weekly_average_km,
+        "long_run_km": long_run_km,
+        "quality_blocks_count": goal_pace_block_count,
+        "goal_pace_block_km": goal_pace_block_km,
+        "goal_pace_block_count": goal_pace_block_count,
+    }
 
     prediction = {
-        "predicted_time": prediction.get("predicted_time", "—"),
-        "range_low": prediction.get("range_low", "—"),
-        "range_high": prediction.get("range_high", "—"),
-        "minutes_vs_goal": prediction.get("minutes_vs_goal", 0),
+        "predicted_time": race.get("goal_time", "—"),
+        "range_low": race.get("goal_time", "—"),
+        "range_high": race.get("goal_time", "—"),
+        "minutes_vs_goal": 0,
     }
 
     progress = compute_goal_progress(race, prediction, training)
+
     status = {
         "readiness": progress.get("status", "unknown"),
         "readiness_label": progress.get("label", "Sin datos"),
         "main_lever": progress.get("main_lever", ""),
+    }
+
+    fatigue = {
+        "signal": fatigue_raw.get("status", "unknown"),
+        "signal_label": fatigue_raw.get("label", "Sin datos"),
+        "reason": fatigue_raw.get("message", ""),
+        "load_ratio_7d_28d": fatigue_raw.get("load_ratio_7d_28d"),
+        "monotony": fatigue_raw.get("monotony"),
+        "strain": fatigue_raw.get("strain"),
     }
 
     return {
@@ -222,7 +244,7 @@ def build_analysis_payload(request: Request) -> dict:
         "training": training,
         "quality_blocks": quality_blocks,
         "fatigue": fatigue,
-        "last_key_session": last_key_session,
+        "last_key_session": last_key_session or {},
         "weeks_to_race": weeks_left,
     }
 
