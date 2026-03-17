@@ -1,4 +1,3 @@
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
@@ -191,7 +190,7 @@ def build_analysis_payload(request: Request) -> dict:
 
     race = get_current_race(request)
 
-    training = compute_training(activities, race)
+    training = compute_training(activities)
     quality_blocks = detect_quality_blocks(activities, race)
     fatigue = compute_fatigue_signal(activities)
     progress = compute_goal_progress(training, quality_blocks, race)
