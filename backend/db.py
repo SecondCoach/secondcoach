@@ -1,20 +1,19 @@
-import os
 import sqlite3
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Optional
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-DB_PATH = os.getenv("DATABASE_PATH", str(BASE_DIR / "secondcoach.db"))
+DB_PATH = BASE_DIR / "backend" / "users.db"
 
 
-def get_conn() -> sqlite3.Connection:
+def get_connection() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
 
-def init_db() -> None:
-    with get_conn() as conn:
+def ensure_user_table() -> None:
+    with get_connection() as conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS users (
@@ -23,90 +22,59 @@ def init_db() -> None:
                 access_token TEXT,
                 refresh_token TEXT,
                 expires_at INTEGER,
-                username TEXT,
-                firstname TEXT,
-                lastname TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TRIGGER IF NOT EXISTS users_updated_at_trigger
-            AFTER UPDATE ON users
-            FOR EACH ROW
-            BEGIN
-                UPDATE users
-                SET updated_at = CURRENT_TIMESTAMP
-                WHERE id = OLD.id;
-            END;
             """
         )
         conn.commit()
 
 
-def upsert_user(
+def save_user(
     strava_athlete_id: int,
     access_token: str,
-    refresh_token: str,
-    expires_at: int,
-    username: Optional[str] = None,
-    firstname: Optional[str] = None,
-    lastname: Optional[str] = None,
+    refresh_token: Optional[str],
+    expires_at: Optional[int],
 ) -> None:
-    init_db()
-    with get_conn() as conn:
+    ensure_user_table()
+    with get_connection() as conn:
         conn.execute(
             """
             INSERT INTO users (
-                strava_athlete_id,
-                access_token,
-                refresh_token,
-                expires_at,
-                username,
-                firstname,
-                lastname
+                strava_athlete_id, access_token, refresh_token, expires_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(strava_athlete_id) DO UPDATE SET
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(strava_athlete_id)
+            DO UPDATE SET
                 access_token = excluded.access_token,
                 refresh_token = excluded.refresh_token,
                 expires_at = excluded.expires_at,
-                username = excluded.username,
-                firstname = excluded.firstname,
-                lastname = excluded.lastname
+                updated_at = CURRENT_TIMESTAMP
             """,
-            (
-                strava_athlete_id,
-                access_token,
-                refresh_token,
-                expires_at,
-                username,
-                firstname,
-                lastname,
-            ),
+            (strava_athlete_id, access_token, refresh_token, expires_at),
         )
         conn.commit()
 
 
-def get_user_by_athlete_id(strava_athlete_id: int) -> Optional[Dict[str, Any]]:
-    init_db()
-    with get_conn() as conn:
+def get_user_by_athlete_id(strava_athlete_id: int) -> Optional[dict]:
+    ensure_user_table()
+    with get_connection() as conn:
         row = conn.execute(
             """
-            SELECT
-                strava_athlete_id,
-                access_token,
-                refresh_token,
-                expires_at,
-                username,
-                firstname,
-                lastname
+            SELECT strava_athlete_id, access_token, refresh_token, expires_at, updated_at
             FROM users
             WHERE strava_athlete_id = ?
             """,
             (strava_athlete_id,),
         ).fetchone()
 
-    return dict(row) if row else None
+    if not row:
+        return None
+
+    return {
+        "strava_athlete_id": row["strava_athlete_id"],
+        "access_token": row["access_token"],
+        "refresh_token": row["refresh_token"],
+        "expires_at": row["expires_at"],
+        "updated_at": row["updated_at"],
+    }
