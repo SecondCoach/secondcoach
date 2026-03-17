@@ -193,7 +193,7 @@ def build_analysis_payload(request: Request) -> dict:
     training = compute_training(activities)
     quality_blocks = detect_quality_blocks(activities, race["goal_time"])
     fatigue = compute_fatigue_signal(activities)
-    last_key_session = build_last_key_session(quality_blocks)
+    last_key_session = build_last_key_session(activities, quality_blocks)
     weeks_left = weeks_to_race(race["date"])
 
     prediction = training.get("prediction", {})
