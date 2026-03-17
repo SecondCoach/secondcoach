@@ -23,8 +23,8 @@ from backend.goal_store import get_user_goal, save_user_goal
 BASE_DIR = Path(__file__).resolve().parent.parent
 ASSETS_DIR = BASE_DIR / "backend" / "assets"
 
-CLIENT_ID = "TU_CLIENT_ID_REAL"
-CLIENT_SECRET = "TU_CLIENT_SECRET_REAL"
+CLIENT_ID = "208434"
+CLIENT_SECRET = "9bfa526853eadc6cfd2381f859fee8fa99b6bf04"
 REDIRECT_URI = "https://secondcoach.onrender.com/callback"
 
 STRAVA_AUTHORIZE_URL = "https://www.strava.com/oauth/authorize"
