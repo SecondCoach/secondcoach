@@ -447,6 +447,7 @@ async def login():
     return RedirectResponse(f"{STRAVA_OAUTH_URL}?{query}")
 
 
+@app.get("/callback")
 @app.get("/auth/strava/callback")
 async def auth_callback(code: str, request: Request):
     response = requests.post(
