@@ -407,15 +407,15 @@ def render_dashboard_html(data: dict[str, Any] | None = None) -> str:
 
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
-    athlete_id = request.session.get("athlete_id")
-    if not athlete_id:
-        return HTMLResponse(render_dashboard_html())
-
-    user = get_user_by_athlete_id(athlete_id)
-    if not user:
-        return HTMLResponse(render_dashboard_html({"error": "user_not_found"}))
-
     try:
+        athlete_id = request.session.get("athlete_id")
+        if not athlete_id:
+            return HTMLResponse(render_dashboard_html())
+
+        user = get_user_by_athlete_id(athlete_id)
+        if not user:
+            return HTMLResponse(render_dashboard_html({"error": "user_not_found"}))
+
         access_token = refresh_access_token_if_needed(user)
         objective_override = request.query_params.get("objective")
         goal_time_override = request.query_params.get("goal_time")
