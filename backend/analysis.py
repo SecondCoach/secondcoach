@@ -606,3 +606,169 @@ def build_coach(
         "next_focus": next_focus,
         "summary": summary,
     }
+# =========================
+# ONE LINE (FINAL PRODUCT)
+# =========================
+
+
+
+def _round_time_5min(hhmm: str) -> str:
+    try:
+        h, m = hhmm.split(":")
+        h = int(h)
+        m = int(m)
+        m_rounded = 5 * round(m / 5)
+        if m_rounded == 60:
+            h += 1
+            m_rounded = 0
+        return f"{h}:{m_rounded:02d}"
+    except:
+        return hhmm
+
+def build_one_line(
+    prediction: Dict[str, Any],
+    training: Dict[str, Any],
+    fatigue: Dict[str, Any],
+    quality_blocks: List[Dict[str, Any]],
+    goal_time: str | None = None,
+) -> Dict[str, str]:
+
+    def fatigue_high():
+        load = _safe_float(fatigue.get("load_ratio"), 1)
+        monotony = _safe_float(fatigue.get("monotony"), 0)
+        strain = _safe_float(fatigue.get("strain"), 0)
+        return load > 1.35 or (monotony > 2 and strain > 500)
+
+    def initial():
+        km7 = _safe_float(training.get("km_last_7_days"), 0)
+        return km7 < 25 or not quality_blocks
+
+    def prediction_ok():
+        return prediction and prediction.get("confidence") != "low"
+
+    def mv():
+        return prediction.get("minutes_vs_goal") or 0
+
+    def low_specificity():
+        if not quality_blocks:
+            return True
+        total = sum(_safe_float(b.get("km")) for b in quality_blocks)
+        return total < 6
+
+    def low_continuity():
+        km7 = _safe_float(training.get("km_last_7_days"), 0)
+        avg = _safe_float(training.get("weekly_average_km"), 0)
+        return avg == 0 or km7 < 0.7 * avg
+
+    def _format_hhmm(value: str | None) -> str:
+        if not value:
+            return ""
+        parts = str(value).split(":")
+        if len(parts) >= 2:
+            return f"{parts[0]}:{parts[1]}"
+        return str(value)
+
+    def _goal_label(value: str | None) -> str:
+        hhmm = _format_hhmm(value)
+        if hhmm.startswith("3:"):
+            return f"sub {hhmm}"
+        return hhmm
+
+    def _behind_punchline() -> str:
+        predicted_hhmm = _format_hhmm(prediction.get("predicted_time"))
+        goal_hhmm = _format_hhmm(goal_time)
+        goal_label = _goal_label(goal_time)
+        if predicted_hhmm and goal_label:
+            return f"Tu entrenamiento ahora mismo es de {_round_time_5min(predicted_hhmm)}, no de {goal_time}."
+        return "Ahora mismo ese objetivo te queda lejos."
+
+    # FATIGA
+    if fatigue_high():
+        return {
+            "headline": "Estás entrenando, pero no estás asimilando.",
+            "subline": "Porque la carga reciente te está pesando más de lo que estás asimilando.",
+            "action": "Esta semana baja carga y llega fresco.",
+            "chip": "FATIGA ALTA",
+        }
+
+    # INICIAL
+    if initial():
+        return {
+            "headline": "Aún no hay una lectura clara.",
+            "subline": "Porque aún no hay suficiente entrenamiento reciente para evaluarte.",
+            "action": "Entrena unas semanas con continuidad y volvemos a leerlo.",
+            "chip": "LECTURA INICIAL",
+        }
+
+    # PREDICTION
+    if prediction_ok():
+        minutes = mv()
+
+        if minutes > 10:
+            suggested_goal = _round_time_5min(_format_hhmm(prediction.get("predicted_time"))) if prediction.get("predicted_time") else ""
+            goal_text = suggested_goal or _round_time_5min(_format_hhmm(prediction.get("predicted_time")))
+            action = (
+                f"O bajas a {goal_text}, o entrenas para correr en {goal_time}."
+                if goal_text else
+                "Ajusta tu objetivo o cambia el nivel de entrenamiento."
+            )
+            return {
+                "headline": "Así, no te va a dar.",
+                "subline": f"Tu entrenamiento ahora mismo es de {goal_text}, no de {goal_time}." if goal_text and goal_time else "Ahora mismo ese objetivo no encaja con tu nivel.",
+                "action": action,
+                "suggested_goal": suggested_goal,
+                "chip": "POR DETRÁS",
+            }
+
+        if 3 < minutes <= 10:
+            motivo = (
+                "Porque aún no estás sosteniendo suficiente trabajo a ritmo objetivo."
+                if low_specificity()
+                else "Porque te falta continuidad en el trabajo que realmente importa."
+            )
+            return {
+                "headline": "Estás cerca, pero aún no es suficiente.",
+                "subline": motivo,
+                "action": "No sumes por sumar: repite semanas buenas.",
+                "chip": "CERCA",
+            }
+
+        if -3 <= minutes <= 3:
+            if low_specificity():
+                return {
+                    "headline": "Estás cerca, pero aún no es suficiente.",
+                    "subline": "Porque aún no estás sosteniendo suficiente trabajo a ritmo objetivo.",
+                    "action": "No sumes por sumar: repite semanas buenas.",
+                    "chip": "CERCA",
+                }
+
+            if minutes >= 0:
+                return {
+                    "headline": "Estás en nivel para ese objetivo.",
+                    "subline": "Hoy te da, pero con poco margen.",
+                    "action": "Mantén el rumbo y protege el trabajo útil.",
+                    "chip": "EN OBJETIVO",
+                }
+
+            return {
+                "headline": "Estás haciendo lo necesario para tu objetivo.",
+                "subline": "Ya estás sosteniendo trabajo específico reciente que encaja con ese nivel.",
+                "action": "Mantén el rumbo y no cambies lo que está funcionando.",
+                "chip": "EN OBJETIVO",
+            }
+
+        if minutes < -3:
+            return {
+                "headline": "Vas por delante de lo que exige tu objetivo.",
+                "subline": "Porque ya estás acumulando más trabajo útil del necesario para ese nivel.",
+                "action": "No aprietes más: consolida y evita pasarte.",
+                "chip": "POR DELANTE",
+            }
+
+    # FALLBACK
+    return {
+        "headline": "Aún no hay una lectura clara.",
+        "subline": "Porque aún no hay suficiente entrenamiento reciente para evaluarte.",
+        "action": "Entrena unas semanas con continuidad y volvemos a leerlo.",
+        "chip": "LECTURA INICIAL",
+    }
