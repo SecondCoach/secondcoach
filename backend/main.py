@@ -7,7 +7,7 @@ import requests
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, Response, RedirectResponse
 from backend.views.share_renderers import _render_share_png, _render_share_story_png
 from backend.views.share_helpers import _share_colors_from_payload
 from backend.analysis_payload import build_analysis_payload_from_runs
