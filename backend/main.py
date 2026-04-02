@@ -380,8 +380,7 @@ def render_dashboard_html(data: dict[str, Any] | None = None) -> str:
       </p>
 
       <div style="display:flex;gap:12px;flex-wrap:wrap;">
-        <a href="/share" style="display:inline-block;padding:12px 16px;border-radius:12px;background:#FC4C02;color:white;text-decoration:none;font-weight:700;">Compartir diagnóstico</a>
-        <a href="/share_story" style="display:inline-block;padding:12px 16px;border-radius:12px;background:#0f172a;border:1px solid #25304d;color:white;text-decoration:none;font-weight:700;">Ver story</a>
+        <a href="/share_story" style="display:inline-block;padding:12px 16px;border-radius:12px;background:#FC4C02;color:white;text-decoration:none;font-weight:700;">Compartir</a>
         <a href="/plan" style="display:inline-block;padding:12px 16px;border-radius:12px;background:#0f172a;border:1px solid #25304d;color:white;text-decoration:none;font-weight:700;">Analizar mi semana</a>
       </div>
     </div>
