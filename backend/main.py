@@ -593,11 +593,10 @@ async def plan_page(request: Request):
 </head>
 <body>
   <div class="wrap">
-    <div style="display:flex;gap:12px;flex-wrap:wrap;margin:0 0 18px 0;">
-      <a href="/" style="display:inline-block;padding:10px 14px;border-radius:12px;background:#0f172a;border:1px solid #25304d;color:white;text-decoration:none;font-weight:700;">Dashboard</a>
-      <a href="/share" style="display:inline-block;padding:10px 14px;border-radius:12px;background:#0f172a;border:1px solid #25304d;color:white;text-decoration:none;font-weight:700;">Lectura</a>
-      <a href="/share_story" style="display:inline-block;padding:10px 14px;border-radius:12px;background:#0f172a;border:1px solid #25304d;color:white;text-decoration:none;font-weight:700;">Story</a>
-    </div>
+<div style="display:flex;gap:12px;flex-wrap:wrap;margin:0 0 18px 0;">
+  <a href="/" style="display:inline-block;padding:10px 14px;border-radius:12px;background:#0f172a;border:1px solid #25304d;color:white;text-decoration:none;font-weight:700;">Dashboard</a>
+  <a href="/share_story" style="display:inline-block;padding:10px 14px;border-radius:12px;background:#0f172a;border:1px solid #25304d;color:white;text-decoration:none;font-weight:700;">Story</a>
+</div>
     <div class="hero">
       <h1>Analizar mi semana</h1>
       <p>Pega tu semana y SecondCoach te dirá si ahora mismo tiene sentido para ti, qué pesa de verdad y qué cambiaría.</p>
