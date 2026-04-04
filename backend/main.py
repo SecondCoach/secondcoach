@@ -262,6 +262,9 @@ def render_dashboard_html(data: dict[str, Any] | None = None) -> str:
 </html>"""
 
     one = data.get("one_line") or {}
+    coach = data.get("coach") or {}
+    status = data.get("status") or {}
+    last_key_session = data.get("last_key_session") or {}
     chip = str(one.get("chip") or "")
     headline = str(one.get("headline") or "")
     subline = str(one.get("subline") or "")
@@ -281,6 +284,18 @@ def render_dashboard_html(data: dict[str, Any] | None = None) -> str:
     avg_week = training.get("weekly_average_km", 0) or 0
     fatigue_label = str(fatigue.get("label") or "")
     load_ratio = (km7 / avg_week) if avg_week else 0
+    coach_next_focus = str(coach.get("next_focus") or "")
+    coach_summary = str(coach.get("summary") or "")
+    status_label = str(status.get("status_label") or "")
+    status_goal = str(status.get("goal") or "")
+    status_prediction = str(status.get("prediction") or "")
+
+    def _format_dashboard_date(value: Any) -> str:
+        raw = str(value or "").strip()
+        if len(raw) >= 10 and raw[4:5] == "-" and raw[7:8] == "-":
+            year, month, day = raw[:10].split("-")
+            return f"{day}-{month}-{year}"
+        return raw
 
     if objective in {"10k", "5k"} and short_goal_product_evidence:
         evidence_items = short_goal_product_evidence
@@ -347,8 +362,55 @@ def render_dashboard_html(data: dict[str, Any] | None = None) -> str:
             "Evita picos de carga innecesarios",
         ]
 
-    evidence_html = "".join([f"<div style='padding:12px 14px;border-radius:14px;background:#0f172a;border:1px solid #25304d;margin-bottom:10px;'>{item}</div>" for item in evidence_items])
-    now_actions_html = "".join([f"<div style='padding:12px 14px;border-radius:14px;background:#0f172a;border:1px solid #25304d;border-left:4px solid #FC4C02;margin-bottom:10px;font-weight:600;'>{item}</div>" for item in now_actions])
+    now_primary = coach_next_focus or action or "Sostén una semana útil y sin ruido."
+    now_support = ""
+    if action and action != now_primary:
+        now_support = action
+    elif coach_summary and coach_summary != now_primary:
+        now_support = coach_summary
+    if len(now_support) > 140:
+        now_support = now_support[:137].rstrip() + "..."
+
+    if fatigue_label == "Alta":
+        trend_headline = "Hoy pesa más cómo estás asimilando."
+        trend_body = "La lectura de hoy parece más condicionada por la carga reciente que por una mejora clara."
+    elif chip == "POR DELANTE":
+        trend_headline = "La lectura de hoy va en buena dirección."
+        trend_body = "Hoy tu nivel parece ir por delante de lo que exige tu objetivo."
+    elif chip == "EN OBJETIVO":
+        trend_headline = "La lectura de hoy se sostiene."
+        trend_body = "Ahora mismo la señal encaja con el objetivo que estás buscando."
+    elif chip == "CERCA":
+        trend_headline = "La lectura mejora, pero aún no se consolida."
+        trend_body = "Hay señal útil, pero todavía hace falta repetir semanas buenas sin romper la continuidad."
+    elif chip == "POR DETRÁS":
+        trend_headline = "La lectura aún no está donde quieres."
+        trend_body = "Todavía falta que tu entrenamiento sostenga mejor el nivel que estás buscando."
+    else:
+        trend_headline = "Todavía no hay una dirección clara."
+        trend_body = "A día de hoy hay señal, pero no lo bastante limpia como para leer más que una tendencia prudente."
+
+    if status_goal and status_prediction:
+        trend_body = f"{trend_body} Hoy la lectura va de {status_prediction} frente a un objetivo de {status_goal}."
+    elif status_label:
+        trend_body = f"{trend_body} Estado actual: {status_label}."
+
+    session_headline = "Todavía no hay una sesión que cambie la lectura."
+    session_body = "Cuando aparezca una sesión realmente importante, la verás aquí con fecha y por qué pesa ahora."
+    if last_key_session:
+        session_type = str(last_key_session.get("type") or "sesión clave")
+        session_date = _format_dashboard_date(last_key_session.get("date"))
+        session_distance = last_key_session.get("distance_km")
+        distance_text = f" de {session_distance} km" if session_distance not in (None, "") else ""
+        session_headline = "Esta es la sesión que más pesa ahora."
+        session_body = f"{session_type.capitalize()}{distance_text} el {session_date}. Es la sesión que más está inclinando tu lectura a día de hoy."
+
+    evidence_html = "".join(
+        [
+            f"<div style='padding:16px;border-radius:16px;background:#0f172a;border:1px solid #25304d;'><div style='font-size:17px;line-height:1.55;font-weight:600;'>{item}</div></div>"
+            for item in evidence_items
+        ]
+    )
 
     return f"""<!doctype html>
 <html lang="es">
@@ -360,43 +422,61 @@ def render_dashboard_html(data: dict[str, Any] | None = None) -> str:
 <body style="margin:0;background:#0b1020;color:white;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
   <div style="max-width:760px;margin:40px auto;padding:24px;box-sizing:border-box;">
 
-    <div style="background:#121a30;border:1px solid #25304d;border-radius:18px;padding:24px 24px 22px 24px;margin-bottom:20px;">
+    <div style="background:linear-gradient(180deg,#141d35 0%,#121a30 100%);border:1px solid #31405f;border-radius:22px;padding:28px 26px 24px 26px;margin-bottom:22px;box-shadow:0 18px 40px rgba(0,0,0,.22);">
       <div style="margin-bottom:14px;">
-        <span style="display:inline-block;padding:7px 12px;border-radius:999px;background:{chip_color};color:white;font-size:12px;font-weight:700;letter-spacing:.02em;">
+        <span style="display:inline-block;padding:8px 13px;border-radius:999px;background:{chip_color};color:white;font-size:12px;font-weight:800;letter-spacing:.02em;">
           {chip}
         </span>
       </div>
 
-      <h1 style="font-size:34px;line-height:1.12;margin:0 0 14px 0;">
+      <h1 style="font-size:40px;line-height:1.06;margin:0 0 12px 0;max-width:11ch;">
         {headline}
       </h1>
 
-      <p style="font-size:18px;line-height:1.45;opacity:.86;margin:0 0 16px 0;">
+      <p style="font-size:18px;line-height:1.5;opacity:.84;margin:0 0 18px 0;max-width:42ch;">
         {subline}
       </p>
 
-      <p style="font-size:20px;line-height:1.4;font-weight:700;margin:0 0 18px 0;">
+      <p style="font-size:21px;line-height:1.42;font-weight:800;margin:0;max-width:34ch;">
         {action}
       </p>
+    </div>
 
-      <div style="display:flex;gap:12px;flex-wrap:wrap;">
-        <a href="/share_story" style="display:inline-block;padding:12px 16px;border-radius:12px;background:#FC4C02;color:white;text-decoration:none;font-weight:700;">Compartir</a>
-        <a href="/plan" style="display:inline-block;padding:12px 16px;border-radius:12px;background:#0f172a;border:1px solid #25304d;color:white;text-decoration:none;font-weight:700;">Analizar mi semana</a>
-      </div>
+    <div style="background:#121a30;border:1px solid #32415f;border-radius:20px;padding:22px 24px;margin-bottom:20px;box-shadow:0 10px 24px rgba(0,0,0,.12);">
+      <div style="font-size:13px;opacity:.65;text-transform:uppercase;letter-spacing:.04em;margin-bottom:12px;">Qué haría ahora</div>
+      <h2 style="font-size:30px;line-height:1.16;margin:0 0 8px 0;max-width:22ch;">{now_primary}</h2>
+      <p style="font-size:16px;line-height:1.55;opacity:.8;margin:0;max-width:46ch;">{now_support}</p>
     </div>
 
     <div style="background:#121a30;border:1px solid #25304d;border-radius:18px;padding:20px 24px;margin-bottom:20px;">
       <div style="font-size:13px;opacity:.65;text-transform:uppercase;letter-spacing:.04em;margin-bottom:12px;">Lo que veo</div>
-      <div style="font-size:17px;line-height:1.7;opacity:.9;">
+      <div style="display:grid;gap:10px;">
         {evidence_html}
       </div>
     </div>
 
+    <div style="background:#121a30;border:1px solid #25304d;border-radius:18px;padding:20px 24px;margin-bottom:20px;">
+      <div style="font-size:13px;opacity:.65;text-transform:uppercase;letter-spacing:.04em;margin-bottom:12px;">Tu tendencia</div>
+      <h2 style="font-size:28px;line-height:1.18;margin:0 0 10px 0;">{trend_headline}</h2>
+      <p style="font-size:17px;line-height:1.6;opacity:.88;margin:0;">{trend_body}</p>
+    </div>
+
+    <div style="background:#121a30;border:1px solid #25304d;border-radius:18px;padding:20px 24px;margin-bottom:20px;">
+      <div style="font-size:13px;opacity:.65;text-transform:uppercase;letter-spacing:.04em;margin-bottom:12px;">La sesión que más pesa ahora</div>
+      <h2 style="font-size:26px;line-height:1.2;margin:0 0 10px 0;max-width:24ch;">{session_headline}</h2>
+      <p style="font-size:17px;line-height:1.6;opacity:.88;margin:0;">{session_body}</p>
+    </div>
+
+    <div style="background:#121a30;border:1px solid #25304d;border-radius:18px;padding:20px 24px;margin-bottom:20px;">
+      <div style="font-size:13px;opacity:.65;text-transform:uppercase;letter-spacing:.04em;margin-bottom:12px;">Compartir</div>
+      <p style="font-size:17px;line-height:1.6;opacity:.84;margin:0 0 16px 0;max-width:40ch;">Si esta lectura explica bien dónde estás, compártela en el formato vertical que mejor encaja con el producto.</p>
+      <a href="/share_story" style="display:inline-block;padding:12px 16px;border-radius:12px;background:#FC4C02;color:white;text-decoration:none;font-weight:700;">Compartir</a>
+    </div>
+
     <div style="background:#121a30;border:1px solid #25304d;border-radius:18px;padding:20px 24px;">
-      <div style="font-size:13px;opacity:.65;text-transform:uppercase;letter-spacing:.04em;margin-bottom:12px;">Qué haría ahora</div>
-      <div style="font-size:17px;line-height:1.7;opacity:.9;">
-        {now_actions_html}
-      </div>
+      <div style="font-size:13px;opacity:.65;text-transform:uppercase;letter-spacing:.04em;margin-bottom:12px;">Ver plan / qué cambiaría esta semana</div>
+      <p style="font-size:17px;line-height:1.6;opacity:.84;margin:0 0 16px 0;max-width:42ch;">Si quieres bajar esta lectura a decisiones concretas, aquí es donde la convertimos en semana real.</p>
+      <a href="/plan" style="display:inline-block;padding:12px 16px;border-radius:12px;background:#0f172a;border:1px solid #25304d;color:white;text-decoration:none;font-weight:700;">Analizar mi semana</a>
     </div>
 
   </div>
