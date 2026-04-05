@@ -5,7 +5,7 @@ from typing import Any
 
 from PIL import Image, ImageDraw, ImageFont
 
-from backend.views.share_helpers import _share_colors_from_payload
+from backend.views.share_helpers import _compact_goal_context_from_payload, _share_colors_from_payload
 
 logger = logging.getLogger("secondcoach")
 
@@ -106,6 +106,7 @@ def _render_share_png(data: dict[str, Any]) -> bytes:
     subline = str(one_line.get("subline") or "")
     action = str(one_line.get("action") or "")
     chip = str(one_line.get("chip") or "SECONDCOACH")
+    compact_goal_context = _compact_goal_context_from_payload(data)
 
     # =========================
     # MOTIVO VISUAL (AUTO)
@@ -164,12 +165,21 @@ def _render_share_png(data: dict[str, Any]) -> bytes:
     draw.text((chip_x + 30, chip_y + 12), chip, font=chip_font, fill="white")
 
     headline_font = _load_font(72, bold=True)
+    context_font = _load_font(28, bold=False)
     reason_font = _load_font(32, bold=True)
     subline_font = _load_font(36, bold=False)
     action_font = _load_font(40, bold=True)
     brand_font = _load_font(34, bold=True)
 
     y = chip_y + chip_h + 88
+
+    if compact_goal_context:
+        context_lines = _wrap_text(draw, compact_goal_context, context_font, inner_width)
+        for line in context_lines:
+            draw.text((inner_left, y), line, font=context_font, fill="#c8d2ea")
+            bbox = draw.textbbox((inner_left, y), line, font=context_font)
+            y += (bbox[3] - bbox[1]) + 6
+        y += 26
 
     if reason_text:
         reason_lines = _wrap_text(draw, reason_text, reason_font, inner_width)
@@ -218,6 +228,7 @@ def _render_share_story_png(data: dict[str, Any]) -> bytes:
     subline = str(one_line.get("subline") or "")
     action = str(one_line.get("action") or "")
     chip = str(one_line.get("chip") or "SECONDCOACH")
+    compact_goal_context = _compact_goal_context_from_payload(data)
 
     def _chip_reason(chip: str) -> str:
         c = chip.upper()
@@ -272,6 +283,7 @@ def _render_share_story_png(data: dict[str, Any]) -> bytes:
     draw.text((chip_x + 36, chip_y + 14), chip, font=chip_font, fill="white")
 
     headline_font = _load_font(86, bold=True)
+    context_font = _load_font(30, bold=False)
     reason_font = _load_font(36, bold=True)
     subline_font = _load_font(42, bold=False)
     action_font = _load_font(48, bold=True)
@@ -279,6 +291,14 @@ def _render_share_story_png(data: dict[str, Any]) -> bytes:
     brand_font = _load_font(40, bold=True)
 
     y = chip_y + chip_h + 108
+
+    if compact_goal_context:
+        context_lines = _wrap_text(draw, compact_goal_context, context_font, inner_width)
+        for line in context_lines:
+            draw.text((inner_left, y), line, font=context_font, fill="#c8d2ea")
+            bbox = draw.textbbox((inner_left, y), line, font=context_font)
+            y += (bbox[3] - bbox[1]) + 8
+        y += 30
 
     if reason_text:
         reason_lines = _wrap_text(draw, reason_text, reason_font, inner_width)
@@ -328,5 +348,4 @@ def _render_share_story_png(data: dict[str, Any]) -> bytes:
     buffer = BytesIO()
     img.save(buffer, format="PNG")
     return buffer.getvalue()
-
 

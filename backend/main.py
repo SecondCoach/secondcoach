@@ -9,7 +9,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response, RedirectResponse
 from backend.views.share_renderers import _render_share_png, _render_share_story_png
-from backend.views.share_helpers import _share_colors_from_payload
+from backend.views.share_helpers import _compact_goal_context_from_payload, _share_colors_from_payload
 from backend.analysis_payload import build_analysis_payload_from_runs
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -271,6 +271,7 @@ def render_dashboard_html(data: dict[str, Any] | None = None) -> str:
     action = str(one.get("action") or "")
     objective = str(data.get("objective") or "")
     short_goal_product_evidence = data.get("short_goal_product_evidence") or []
+    compact_goal_context = _compact_goal_context_from_payload(data)
 
     _bg_color, _card_color, chip_color = _share_colors_from_payload(data)
 
@@ -428,6 +429,8 @@ def render_dashboard_html(data: dict[str, Any] | None = None) -> str:
           {chip}
         </span>
       </div>
+
+      {f'<div style="font-size:14px;line-height:1.4;opacity:.72;letter-spacing:.02em;text-transform:none;margin:0 0 14px 0;">{compact_goal_context}</div>' if compact_goal_context else ''}
 
       <h1 style="font-size:40px;line-height:1.06;margin:0 0 12px 0;max-width:11ch;">
         {headline}
@@ -805,6 +808,7 @@ def render_share_html(data: dict[str, Any]) -> str:
     subline = one.get("subline", "")
     action = one.get("action", "")
     chip = one.get("chip", "SECONDCOACH")
+    compact_goal_context = _compact_goal_context_from_payload(data)
     bg_color, card_color, accent_color = _share_colors_from_payload(data)
 
     logo_html = ""
@@ -863,6 +867,14 @@ body {{
     font-size: 24px;
     margin-bottom: 38px;
 }}
+.context {{
+    font-size: 24px;
+    line-height: 1.35;
+    color: #c8d2ea;
+    opacity: 0.82;
+    margin-bottom: 26px;
+    letter-spacing: 0.01em;
+}}
 .headline {{
     font-size: 96px;
     line-height: 1.06;
@@ -905,6 +917,7 @@ body {{
 <body>
 <div class="card">
   <div class="badge">{chip}</div>
+  {f'<div class="context">{compact_goal_context}</div>' if compact_goal_context else ''}
   <div class="headline">{headline}</div>
   <div class="subline">{subline}</div>
   <div class="action">{action}</div>
@@ -922,6 +935,7 @@ def render_share_story_html(data: dict[str, Any]) -> str:
     subline = one.get("subline", "")
     action = one.get("action", "")
     chip = one.get("chip", "SECONDCOACH")
+    compact_goal_context = _compact_goal_context_from_payload(data)
     bg_color, card_color, accent_color = _share_colors_from_payload(data)
 
     logo_html = ""
@@ -983,6 +997,14 @@ body {{
     font-size: 18px;
     margin-bottom: 28px;
 }}
+.context {{
+    font-size: 18px;
+    line-height: 1.35;
+    color: #c8d2ea;
+    opacity: 0.82;
+    margin-bottom: 20px;
+    letter-spacing: 0.01em;
+}}
 .headline {{
     font-size: 52px;
     line-height: 1.05;
@@ -1023,6 +1045,7 @@ body {{
 <body>
 <div class="story">
   <div class="badge">{chip}</div>
+  {f'<div class="context">{compact_goal_context}</div>' if compact_goal_context else ''}
   <div class="headline">{headline}</div>
   <div class="subline">{subline}</div>
   <div class="action">{action}</div>
