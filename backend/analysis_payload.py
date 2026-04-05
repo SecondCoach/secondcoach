@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from typing import Any
 
 from backend.analysis import (
@@ -132,6 +133,38 @@ def _build_status_block(goal_time: str | None, prediction: dict[str, Any]) -> di
     }
 
 
+def _build_race_context(race_date: str | None) -> dict[str, Any] | None:
+    if not race_date:
+        return None
+
+    raw = str(race_date).strip()
+    if not raw:
+        return None
+
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            dt = datetime.fromisoformat(f"{raw}T00:00:00+00:00")
+        except ValueError:
+            return None
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+
+    today = datetime.now(timezone.utc).date()
+    target_day = dt.date()
+    days_to_race = (target_day - today).days
+
+    return {
+        "race_date": raw,
+        "days_to_race": days_to_race,
+        "is_pre_race_window": 0 <= days_to_race <= 7,
+    }
+
+
 def build_analysis_payload_from_runs(
     runs: list[dict[str, Any]],
     user: dict[str, Any] | None = None,
@@ -143,6 +176,7 @@ def build_analysis_payload_from_runs(
     objective_raw = objective_override or user.get("objective") or "Maratón"
     objective = _normalize_objective(objective_raw)
     race_date = user.get("race_date")
+    race_context = _build_race_context(race_date)
 
     quality_blocks = detect_quality_blocks(runs)
     training_tuple = compute_training(runs)
@@ -209,6 +243,7 @@ def build_analysis_payload_from_runs(
         fatigue=fatigue,
         quality_blocks=quality_blocks,
         goal_time=goal_time,
+        race_context=race_context,
     )
 
     if objective in {"10k", "5k"}:

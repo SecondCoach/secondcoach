@@ -631,6 +631,7 @@ def build_one_line(
     fatigue: Dict[str, Any],
     quality_blocks: List[Dict[str, Any]],
     goal_time: str | None = None,
+    race_context: Dict[str, Any] | None = None,
 ) -> Dict[str, str]:
 
     def fatigue_high():
@@ -682,14 +683,18 @@ def build_one_line(
             return f"Tu entrenamiento ahora mismo es de {_round_time_5min(predicted_hhmm)}, no de {goal_time}."
         return "Ahora mismo ese objetivo te queda lejos."
 
+    def in_pre_race_window() -> bool:
+        return bool(race_context and race_context.get("is_pre_race_window"))
+
     # FATIGA
     if fatigue_high():
-        return {
-            "headline": "Estás entrenando, pero no estás asimilando.",
-            "subline": "Porque la carga reciente te está pesando más de lo que estás asimilando.",
-            "action": "Esta semana baja carga y llega fresco.",
-            "chip": "FATIGA ALTA",
-        }
+        if not in_pre_race_window():
+            return {
+                "headline": "Estás entrenando, pero no estás asimilando.",
+                "subline": "Porque la carga reciente te está pesando más de lo que estás asimilando.",
+                "action": "Esta semana baja carga y llega fresco.",
+                "chip": "FATIGA ALTA",
+            }
 
     # INICIAL
     if initial():
