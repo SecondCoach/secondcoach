@@ -7,7 +7,7 @@ export default function App() {
     <SafeAreaView style={{ flex: 1 }}>
       <StatusBar barStyle="dark-content" />
       <WebView
-        source={{ uri: "https://secondcoach.onrender.com/start" }}
+        source={{ uri: "https://secondcoach.onrender.com/" }}
         startInLoadingState={true}
         javaScriptEnabled={true}
         domStorageEnabled={true}
