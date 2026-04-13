@@ -290,7 +290,6 @@ def render_dashboard_html(data: dict[str, Any] | None = None) -> str:
     status_label = str(status.get("status_label") or "")
     status_goal = str(status.get("goal") or "")
     status_prediction = str(status.get("prediction") or "")
-    weekly_trend = data.get("weekly_trend") or []
 
     def _format_dashboard_date(value: Any) -> str:
         raw = str(value or "").strip()
@@ -413,35 +412,6 @@ def render_dashboard_html(data: dict[str, Any] | None = None) -> str:
             for item in evidence_items
         ]
     )
-    weekly_trend_max = max(
-        [_safe_int(round(float(item.get("total_km") or 0))) for item in weekly_trend] or [0]
-    )
-    weekly_trend_html = ""
-    if weekly_trend and weekly_trend_max > 0:
-        trend_bars = []
-        for item in weekly_trend:
-            total_km = float(item.get("total_km") or 0)
-            bar_height = 0.0 if weekly_trend_max <= 0 else max((total_km / weekly_trend_max) * 100.0, 6.0 if total_km > 0 else 0.0)
-            trend_bars.append(
-                f"""
-                <div style="flex:1;min-width:0;display:flex;flex-direction:column;align-items:center;gap:8px;">
-                  <div style="font-size:12px;line-height:1;color:#c8d2ea;opacity:.82;">{int(round(total_km))} km</div>
-                  <div style="width:100%;max-width:54px;height:112px;border-radius:14px;background:#0f172a;border:1px solid #25304d;display:flex;align-items:flex-end;justify-content:center;padding:6px;box-sizing:border-box;">
-                    <div style="width:100%;border-radius:10px;background:linear-gradient(180deg,#3f4f78 0%,#7f8fb7 100%);height:{bar_height:.1f}%;min-height:{'6px' if total_km > 0 else '0'};"></div>
-                  </div>
-                  <div style="font-size:11px;line-height:1.2;color:#c8d2ea;opacity:.65;text-align:center;">{item.get('label') or ''}</div>
-                </div>
-                """
-            )
-
-        weekly_trend_html = f"""
-        <div style="margin-top:18px;padding-top:18px;border-top:1px solid #25304d;">
-          <div style="font-size:13px;opacity:.65;text-transform:uppercase;letter-spacing:.04em;margin-bottom:14px;">Últimas 6 semanas</div>
-          <div style="display:flex;align-items:flex-end;gap:10px;">
-            {''.join(trend_bars)}
-          </div>
-        </div>
-        """
 
     return f"""<!doctype html>
 <html lang="es">
@@ -492,7 +462,6 @@ def render_dashboard_html(data: dict[str, Any] | None = None) -> str:
       <div style="font-size:13px;opacity:.65;text-transform:uppercase;letter-spacing:.04em;margin-bottom:12px;">Tu tendencia</div>
       <h2 style="font-size:28px;line-height:1.18;margin:0 0 10px 0;">{trend_headline}</h2>
       <p style="font-size:17px;line-height:1.6;opacity:.88;margin:0;">{trend_body}</p>
-      {weekly_trend_html}
     </div>
 
     <div style="background:#121a30;border:1px solid #25304d;border-radius:18px;padding:20px 24px;margin-bottom:20px;">
