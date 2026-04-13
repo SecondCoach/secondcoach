@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from backend.analysis import (
@@ -165,6 +165,74 @@ def _build_race_context(race_date: str | None) -> dict[str, Any] | None:
     }
 
 
+def _build_weekly_trend(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _format_week_label(start_day: Any, end_day: Any) -> str:
+        return f"{start_day.strftime('%d-%m')} · {end_day.strftime('%d-%m')}"
+
+    run_days: list[Any] = []
+
+    for run in runs:
+        raw = run.get("start_date_local") or run.get("start_date")
+        if not raw:
+            continue
+
+        try:
+            dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt = dt.astimezone(timezone.utc)
+
+        run_day = dt.date()
+        run_days.append(run_day)
+
+    if not run_days:
+        return []
+
+    reference_day = max(run_days)
+    current_week_start = reference_day - timedelta(days=reference_day.weekday())
+    latest_closed_week_start = current_week_start - timedelta(days=7)
+    week_starts = [
+        latest_closed_week_start - timedelta(days=7 * offset)
+        for offset in range(5, -1, -1)
+    ]
+    weekly_totals = {week_start: 0.0 for week_start in week_starts}
+
+    for run in runs:
+        raw = run.get("start_date_local") or run.get("start_date")
+        if not raw:
+            continue
+
+        try:
+            dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt = dt.astimezone(timezone.utc)
+
+        run_day = dt.date()
+        run_week_start = run_day - timedelta(days=run_day.weekday())
+        if run_week_start in weekly_totals:
+            if run.get("distance") is not None:
+                weekly_totals[run_week_start] += _safe_float(run.get("distance")) / 1000.0
+            else:
+                weekly_totals[run_week_start] += _safe_float(run.get("distance_km"))
+
+    return [
+        {
+            "label": _format_week_label(week_start, week_start + timedelta(days=6)),
+            "total_km": round(weekly_totals[week_start], 1),
+        }
+        for week_start in week_starts
+    ]
+
+
 def build_analysis_payload_from_runs(
     runs: list[dict[str, Any]],
     user: dict[str, Any] | None = None,
@@ -177,6 +245,7 @@ def build_analysis_payload_from_runs(
     objective = _normalize_objective(objective_raw)
     race_date = user.get("race_date")
     race_context = _build_race_context(race_date)
+    weekly_trend = _build_weekly_trend(runs)
 
     quality_blocks = detect_quality_blocks(runs)
     training_tuple = compute_training(runs)
@@ -266,6 +335,7 @@ def build_analysis_payload_from_runs(
         "race_date": race_date,
         "prediction": prediction,
         "training": training,
+        "weekly_trend": weekly_trend,
         "fatigue": fatigue,
         "coach": coach,
         "quality_blocks": quality_blocks,
