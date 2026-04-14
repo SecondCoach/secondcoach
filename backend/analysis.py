@@ -486,6 +486,8 @@ def compute_prediction(
     fatigue: Dict[str, Any],
     quality_blocks: List[Dict[str, Any]],
     goal_time: Optional[str],
+    race_context: Dict[str, Any] | None = None,
+    objective: Optional[str] = None,
 ) -> Dict[str, Any]:
     weekly = _safe_float(training.get("weekly_average_km"))
     long_run = _safe_float(training.get("long_run_km"))
@@ -518,10 +520,15 @@ def compute_prediction(
     )
 
     fatigue_label = str(fatigue.get("label") or "")
+    is_marathon_pre_race = (
+        objective == "marathon"
+        and bool(race_context)
+        and bool(race_context.get("is_pre_race_window"))
+    )
     if fatigue_label == "Alta":
-        pace *= 1.035
+        pace *= 1.015 if is_marathon_pre_race else 1.035
     elif fatigue_label == "Media":
-        pace *= 1.02
+        pace *= 1.01 if is_marathon_pre_race else 1.02
 
     total = pace * 42.195
     low = total * 0.955

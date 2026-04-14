@@ -193,6 +193,8 @@ def build_analysis_payload_from_runs(
         fatigue=fatigue,
         quality_blocks=quality_blocks,
         goal_time=goal_time,
+        race_context=race_context,
+        objective=objective,
     )
     last_key_session = build_last_key_session(runs, quality_blocks)
     coach = build_coach(
