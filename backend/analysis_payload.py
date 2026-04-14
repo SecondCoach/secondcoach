@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from backend.analysis import (
@@ -133,7 +133,10 @@ def _build_status_block(goal_time: str | None, prediction: dict[str, Any]) -> di
     }
 
 
-def _build_race_context(race_date: str | None) -> dict[str, Any] | None:
+def _build_race_context(
+    race_date: str | None,
+    as_of: datetime | None = None,
+) -> dict[str, Any] | None:
     if not race_date:
         return None
 
@@ -154,7 +157,7 @@ def _build_race_context(race_date: str | None) -> dict[str, Any] | None:
     else:
         dt = dt.astimezone(timezone.utc)
 
-    today = datetime.now(timezone.utc).date()
+    today = (as_of or datetime.now(timezone.utc)).date()
     target_day = dt.date()
     days_to_race = (target_day - today).days
 
@@ -165,21 +168,227 @@ def _build_race_context(race_date: str | None) -> dict[str, Any] | None:
     }
 
 
+def _build_prediction_trend(
+    runs: list[dict[str, Any]],
+    user: dict[str, Any],
+    objective_override: str | None,
+    as_of: datetime | None,
+) -> list[dict[str, Any]]:
+    reference = as_of or datetime.now(timezone.utc)
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=timezone.utc)
+    else:
+        reference = reference.astimezone(timezone.utc)
+
+    last_closed_week_end = (
+        reference - timedelta(days=reference.weekday() + 1)
+    ).replace(hour=23, minute=59, second=59, microsecond=0)
+
+    points: list[dict[str, Any]] = []
+
+    for weeks_back in range(4, -1, -1):
+        point_as_of = last_closed_week_end - timedelta(weeks=weeks_back)
+        snapshot = build_analysis_payload_from_runs(
+            runs=runs,
+            user=user,
+            objective_override=objective_override,
+            as_of=point_as_of,
+            include_prediction_trend=False,
+        )
+        point_prediction = snapshot.get("prediction") or {}
+        point_training = snapshot.get("training") or {}
+        point_quality_blocks = snapshot.get("quality_blocks") or []
+        has_signal = bool(point_quality_blocks) or any(
+            _safe_float(point_training.get(key)) > 0
+            for key in ("km_last_7_days", "weekly_average_km", "long_run_km")
+        )
+
+        predicted_time = point_prediction.get("predicted_time") if has_signal else None
+        minutes_vs_goal = (
+            _safe_int(point_prediction.get("minutes_vs_goal"))
+            if has_signal and point_prediction.get("minutes_vs_goal") is not None
+            else None
+        )
+
+        points.append(
+            {
+                "label": point_as_of.strftime("%d-%m"),
+                "predicted_time": predicted_time,
+                "minutes_vs_goal": minutes_vs_goal,
+            }
+        )
+
+    return points
+
+
+def _build_half_marathon_readout(
+    training: dict[str, Any],
+    fatigue: dict[str, Any],
+    quality_blocks: list[dict[str, Any]],
+) -> tuple[dict[str, Any], dict[str, str]]:
+    weekly = _safe_float(training.get("weekly_average_km"))
+    km7 = _safe_float(training.get("km_last_7_days"))
+    long_run = _safe_float(training.get("long_run_km"))
+    fatigue_label = str(fatigue.get("label") or "")
+    spec_km = sum(_safe_float(block.get("km")) for block in quality_blocks)
+    block_count = len(quality_blocks)
+    has_signal = weekly >= 24 or km7 >= 18 or long_run >= 14 or spec_km >= 6 or block_count >= 1
+
+    if not has_signal:
+        return (
+            {
+                "goal": "Media maratón",
+                "prediction": None,
+                "delta_minutes": None,
+                "status_label": "todavía falta señal útil para leer tu media",
+            },
+            {
+                "headline": "Aún no se deja leer tu media.",
+                "subline": "Todavía falta continuidad y algo más de trabajo útil para leer tu nivel con credibilidad.",
+                "action": "Suma semanas estables y mete una sesión útil antes de volver a evaluarlo.",
+                "chip": "LECTURA INICIAL",
+            },
+        )
+
+    if fatigue_label == "Alta":
+        return (
+            {
+                "goal": "Media maratón",
+                "prediction": None,
+                "delta_minutes": None,
+                "status_label": "señal de media tapada por fatiga",
+            },
+            {
+                "headline": "Tu nivel para media está, pero hoy llega tapado.",
+                "subline": "La carga reciente pesa más que la lectura fina de tu nivel.",
+                "action": "Recorta ruido esta semana y vuelve a mirar la señal con más frescura.",
+                "chip": "FATIGA ALTA",
+            },
+        )
+
+    if weekly < 28 or long_run < 15 or (spec_km < 8 and block_count == 0):
+        return (
+            {
+                "goal": "Media maratón",
+                "prediction": None,
+                "delta_minutes": None,
+                "status_label": "tu media todavía no se sostiene con solidez",
+            },
+            {
+                "headline": "Tu nivel ahora mismo no sostiene una media sólida.",
+                "subline": "Te falta combinar mejor continuidad, tirada larga y algo de trabajo útil a ritmo.",
+                "action": "Antes de apretar objetivo, consolida semanas más estables y una tirada larga más seria.",
+                "chip": "POR DETRÁS",
+            },
+        )
+
+    if weekly < 38 or long_run < 18 or spec_km < 12 or block_count < 2:
+        return (
+            {
+                "goal": "Media maratón",
+                "prediction": None,
+                "delta_minutes": None,
+                "status_label": "media maratón cerca, pero aún sin demasiado margen",
+            },
+            {
+                "headline": "Tu nivel ahora mismo está cerca de una media.",
+                "subline": "Ya hay base útil, pero todavía falta más continuidad para sostenerla con margen.",
+                "action": "Repite semanas buenas y protege una tirada larga sólida con un bloque útil.",
+                "chip": "CERCA",
+            },
+        )
+
+    return (
+        {
+            "goal": "Media maratón",
+            "prediction": None,
+            "delta_minutes": None,
+            "status_label": "lectura coherente con una media maratón",
+        },
+        {
+            "headline": "Tu nivel ahora mismo encaja con una media.",
+            "subline": "Ya tienes una base que se parece a una media creíble, siempre que sigas sosteniéndola.",
+            "action": "No busques épica: mantén continuidad y llega con frescura.",
+            "chip": "EN OBJETIVO",
+        },
+    )
+
+
+def _build_half_marathon_coach(
+    training: dict[str, Any],
+    fatigue: dict[str, Any],
+    quality_blocks: list[dict[str, Any]],
+) -> dict[str, str]:
+    weekly = _safe_float(training.get("weekly_average_km"))
+    km7 = _safe_float(training.get("km_last_7_days"))
+    long_run = _safe_float(training.get("long_run_km"))
+    fatigue_label = str(fatigue.get("label") or "")
+    spec_km = sum(_safe_float(block.get("km")) for block in quality_blocks)
+    block_count = len(quality_blocks)
+    has_signal = weekly >= 24 or km7 >= 18 or long_run >= 14 or spec_km >= 6 or block_count >= 1
+
+    if not has_signal:
+        return {
+            "positive": "Todavía no hay suficiente señal útil para leer bien tu nivel de media.",
+            "limiter": "Falta continuidad y algo más de trabajo útil para que la lectura gane credibilidad.",
+            "next_focus": "Encadena semanas estables y mete una sesión útil antes de volver a evaluarlo.",
+            "summary": "Ahora mismo todavía falta base real para leer tu media maratón con claridad.",
+        }
+
+    if fatigue_label == "Alta":
+        return {
+            "positive": "La base reciente permite intuir nivel de media.",
+            "limiter": "La fatiga reciente tapa parte de la señal buena que sí tienes.",
+            "next_focus": "Baja ruido esta semana y busca llegar más fresco a la siguiente sesión útil.",
+            "summary": "La lectura de media existe, pero hoy queda distorsionada por la fatiga.",
+        }
+
+    if weekly < 28 or long_run < 15 or (spec_km < 8 and block_count == 0):
+        return {
+            "positive": "Ya aparece algo de base para empezar a leer este objetivo.",
+            "limiter": "Todavía falta combinar mejor continuidad, tirada larga y trabajo útil a ritmo.",
+            "next_focus": "Consolida semanas más estables y una tirada larga más seria antes de apretar el objetivo.",
+            "summary": "Tu base actual todavía no sostiene una media maratón con suficiente solidez.",
+        }
+
+    if weekly < 38 or long_run < 18 or spec_km < 12 or block_count < 2:
+        return {
+            "positive": "Ya hay señales útiles que empiezan a parecerse a una media creíble.",
+            "limiter": "Todavía falta algo más de continuidad para sostener ese nivel con margen.",
+            "next_focus": "Repite semanas buenas y protege una tirada larga sólida con un bloque útil.",
+            "summary": "La lectura de media está cerca, pero todavía no sobra margen.",
+        }
+
+    return {
+        "positive": "Ya hay base suficiente para leer una media maratón con credibilidad.",
+        "limiter": "El riesgo ahora es meter ruido y perder continuidad más que falta de base.",
+        "next_focus": "Mantén continuidad, no añadas épica innecesaria y llega fresco a las sesiones útiles.",
+        "summary": "Tu entrenamiento ya se parece al de una media maratón bien sostenida.",
+    }
+
+
 def build_analysis_payload_from_runs(
     runs: list[dict[str, Any]],
     user: dict[str, Any] | None = None,
     objective_override: str | None = None,
+    as_of: datetime | None = None,
+    include_prediction_trend: bool = True,
 ) -> dict[str, Any]:
     user = user or {}
+    if as_of is not None:
+        if as_of.tzinfo is None:
+            as_of = as_of.replace(tzinfo=timezone.utc)
+        else:
+            as_of = as_of.astimezone(timezone.utc)
 
     goal_time = user.get("goal_time") or "3:30"
     objective_raw = objective_override or user.get("objective") or "Maratón"
     objective = _normalize_objective(objective_raw)
     race_date = user.get("race_date")
-    race_context = _build_race_context(race_date)
+    race_context = _build_race_context(race_date, as_of=as_of)
 
-    quality_blocks = detect_quality_blocks(runs)
-    training_tuple = compute_training(runs)
+    quality_blocks = detect_quality_blocks(runs, as_of=as_of)
+    training_tuple = compute_training(runs, as_of=as_of)
     training = {
         "km_last_7_days": training_tuple[0],
         "km_last_7": training_tuple[0],
@@ -187,7 +396,7 @@ def build_analysis_payload_from_runs(
         "avg_week_km": training_tuple[1],
         "long_run_km": training_tuple[2],
     }
-    fatigue = compute_fatigue_signal(runs)
+    fatigue = compute_fatigue_signal(runs, as_of=as_of)
     prediction = compute_prediction(
         training=training,
         fatigue=fatigue,
@@ -216,7 +425,26 @@ def build_analysis_payload_from_runs(
 
     status = _build_status_block(goal_time=goal_time, prediction=prediction)
 
-    if objective in {"half_marathon", "10k", "5k"}:
+    if objective == "half_marathon":
+        prediction = {
+            **prediction,
+            "predicted_time": None,
+            "range_low": None,
+            "range_high": None,
+            "minutes_vs_goal": None,
+            "message": "Lectura de media maratón activa, sin tiempo exacto por ahora.",
+        }
+        status, one_line = _build_half_marathon_readout(
+            training=training,
+            fatigue=fatigue,
+            quality_blocks=quality_blocks,
+        )
+        coach = _build_half_marathon_coach(
+            training=training,
+            fatigue=fatigue,
+            quality_blocks=quality_blocks,
+        )
+    elif objective in {"10k", "5k"}:
         prediction = {
             **prediction,
             "predicted_time": None,
@@ -231,8 +459,6 @@ def build_analysis_payload_from_runs(
             "delta_minutes": None,
             "status_label": "sin predicción específica todavía",
         }
-
-    if objective in {"10k", "5k"}:
         one_line = build_one_line_short_goal(
             objective=objective,
             goal_time=goal_time,
@@ -240,13 +466,13 @@ def build_analysis_payload_from_runs(
         )
     else:
         one_line = build_one_line(
-        prediction=prediction,
-        training=training,
-        fatigue=fatigue,
-        quality_blocks=quality_blocks,
-        goal_time=goal_time,
-        race_context=race_context,
-    )
+            prediction=prediction,
+            training=training,
+            fatigue=fatigue,
+            quality_blocks=quality_blocks,
+            goal_time=goal_time,
+            race_context=race_context,
+        )
 
     if objective in {"10k", "5k"}:
         short_goal_evidence = build_short_goal_evidence(
@@ -262,6 +488,17 @@ def build_analysis_payload_from_runs(
     else:
         short_goal_product_evidence = []
 
+    prediction_trend = (
+        _build_prediction_trend(
+            runs=runs,
+            user=user,
+            objective_override=objective_override,
+            as_of=as_of,
+        )
+        if include_prediction_trend and objective == "marathon"
+        else []
+    )
+
     return {
         "objective": objective,
         "goal_time": goal_time,
@@ -276,6 +513,7 @@ def build_analysis_payload_from_runs(
         "one_line": one_line,
         "short_goal_evidence": short_goal_evidence,
         "short_goal_product_evidence": short_goal_product_evidence,
+        "prediction_trend": prediction_trend,
     }
 
 
