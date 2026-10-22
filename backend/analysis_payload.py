@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 
 from backend.analysis import (
@@ -135,7 +135,6 @@ def _build_status_block(goal_time: str | None, prediction: dict[str, Any]) -> di
 
 def _build_race_context(
     race_date: str | None,
-    as_of: datetime | None = None,
 ) -> dict[str, Any] | None:
     if not race_date:
         return None
@@ -157,7 +156,7 @@ def _build_race_context(
     else:
         dt = dt.astimezone(timezone.utc)
 
-    today = (as_of or datetime.now(timezone.utc)).date()
+    today = datetime.now(timezone.utc).date()
     target_day = dt.date()
     days_to_race = (target_day - today).days
 
@@ -166,59 +165,6 @@ def _build_race_context(
         "days_to_race": days_to_race,
         "is_pre_race_window": 0 <= days_to_race <= 7,
     }
-
-
-def _build_prediction_trend(
-    runs: list[dict[str, Any]],
-    user: dict[str, Any],
-    objective_override: str | None,
-    as_of: datetime | None,
-) -> list[dict[str, Any]]:
-    reference = as_of or datetime.now(timezone.utc)
-    if reference.tzinfo is None:
-        reference = reference.replace(tzinfo=timezone.utc)
-    else:
-        reference = reference.astimezone(timezone.utc)
-
-    last_closed_week_end = (
-        reference - timedelta(days=reference.weekday() + 1)
-    ).replace(hour=23, minute=59, second=59, microsecond=0)
-
-    points: list[dict[str, Any]] = []
-
-    for weeks_back in range(4, -1, -1):
-        point_as_of = last_closed_week_end - timedelta(weeks=weeks_back)
-        snapshot = build_analysis_payload_from_runs(
-            runs=runs,
-            user=user,
-            objective_override=objective_override,
-            as_of=point_as_of,
-            include_prediction_trend=False,
-        )
-        point_prediction = snapshot.get("prediction") or {}
-        point_training = snapshot.get("training") or {}
-        point_quality_blocks = snapshot.get("quality_blocks") or []
-        has_signal = bool(point_quality_blocks) or any(
-            _safe_float(point_training.get(key)) > 0
-            for key in ("km_last_7_days", "weekly_average_km", "long_run_km")
-        )
-
-        predicted_time = point_prediction.get("predicted_time") if has_signal else None
-        minutes_vs_goal = (
-            _safe_int(point_prediction.get("minutes_vs_goal"))
-            if has_signal and point_prediction.get("minutes_vs_goal") is not None
-            else None
-        )
-
-        points.append(
-            {
-                "label": point_as_of.strftime("%d-%m"),
-                "predicted_time": predicted_time,
-                "minutes_vs_goal": minutes_vs_goal,
-            }
-        )
-
-    return points
 
 
 def _build_half_marathon_readout(
@@ -371,24 +317,17 @@ def build_analysis_payload_from_runs(
     runs: list[dict[str, Any]],
     user: dict[str, Any] | None = None,
     objective_override: str | None = None,
-    as_of: datetime | None = None,
-    include_prediction_trend: bool = True,
 ) -> dict[str, Any]:
     user = user or {}
-    if as_of is not None:
-        if as_of.tzinfo is None:
-            as_of = as_of.replace(tzinfo=timezone.utc)
-        else:
-            as_of = as_of.astimezone(timezone.utc)
 
     goal_time = user.get("goal_time") or "3:30"
     objective_raw = objective_override or user.get("objective") or "Maratón"
     objective = _normalize_objective(objective_raw)
     race_date = user.get("race_date")
-    race_context = _build_race_context(race_date, as_of=as_of)
+    race_context = _build_race_context(race_date)
 
-    quality_blocks = detect_quality_blocks(runs, as_of=as_of)
-    training_tuple = compute_training(runs, as_of=as_of)
+    quality_blocks = detect_quality_blocks(runs)
+    training_tuple = compute_training(runs)
     training = {
         "km_last_7_days": training_tuple[0],
         "km_last_7": training_tuple[0],
@@ -396,7 +335,7 @@ def build_analysis_payload_from_runs(
         "avg_week_km": training_tuple[1],
         "long_run_km": training_tuple[2],
     }
-    fatigue = compute_fatigue_signal(runs, as_of=as_of)
+    fatigue = compute_fatigue_signal(runs)
     prediction = compute_prediction(
         training=training,
         fatigue=fatigue,
@@ -488,17 +427,6 @@ def build_analysis_payload_from_runs(
     else:
         short_goal_product_evidence = []
 
-    prediction_trend = (
-        _build_prediction_trend(
-            runs=runs,
-            user=user,
-            objective_override=objective_override,
-            as_of=as_of,
-        )
-        if include_prediction_trend and objective == "marathon"
-        else []
-    )
-
     return {
         "objective": objective,
         "goal_time": goal_time,
@@ -513,7 +441,6 @@ def build_analysis_payload_from_runs(
         "one_line": one_line,
         "short_goal_evidence": short_goal_evidence,
         "short_goal_product_evidence": short_goal_product_evidence,
-        "prediction_trend": prediction_trend,
     }
 
 
